@@ -1,39 +1,51 @@
-export type ConnectionState = RTCPeerConnectionState
+import { audioContext } from './audio.ts'
+import type {
+  ClientMessage,
+  PeerInfo,
+  ServerMessage,
+  SignalData,
+} from './protocol.ts'
 
-export interface PlayerState {
-  id: string
-  name: string
-  connection: ConnectionState
-}
-
-export interface VoiceRoomEvents {
-  /** The list of other players, or the state of a connection, changed. */
-  onPlayersChanged: (players: PlayerState[]) => void
-  /** The connection to the server was lost or refused. */
-  onDisconnected: (reason: string) => void
+export interface VoiceEvents {
+  /** A connection to another player changed state. */
+  onConnectionsChanged: () => void
   /** The browser refused to start playback until the user interacts. */
   onPlaybackBlocked: () => void
 }
-
-interface PeerInfo {
-  id: string
-  name: string
-}
-
-type SignalData =
-  | { description: RTCSessionDescriptionInit }
-  | { candidate: RTCIceCandidateInit }
-
-type ServerMessage =
-  | { type: 'welcome'; id: string; peers: PeerInfo[] }
-  | { type: 'peer-joined'; peer: PeerInfo }
-  | { type: 'peer-left'; id: string }
-  | { type: 'signal'; from: string; data: SignalData }
 
 interface Peer {
   info: PeerInfo
   pc: RTCPeerConnection
   audio: HTMLAudioElement
+  meter: LevelMeter | null
+}
+
+/** Measures how loud a stream is, to animate whoever is speaking. */
+class LevelMeter {
+  private readonly source: MediaStreamAudioSourceNode
+  private readonly analyser: AnalyserNode
+  private readonly samples: Uint8Array<ArrayBuffer>
+
+  constructor(stream: MediaStream) {
+    const context = audioContext()
+    this.source = context.createMediaStreamSource(stream)
+    this.analyser = context.createAnalyser()
+    this.analyser.fftSize = 512
+    this.samples = new Uint8Array(this.analyser.fftSize)
+    this.source.connect(this.analyser)
+  }
+
+  /** Current loudness, from 0 to about 1. */
+  level(): number {
+    this.analyser.getByteTimeDomainData(this.samples)
+    let sum = 0
+    for (const sample of this.samples) sum += ((sample - 128) / 128) ** 2
+    return Math.min(1, Math.sqrt(sum / this.samples.length) * 4)
+  }
+
+  disconnect(): void {
+    this.source.disconnect()
+  }
 }
 
 // STUN only finds a direct route between players. Players behind strict NATs
@@ -42,45 +54,46 @@ const ICE_SERVERS: RTCIceServer[] = import.meta.env.VITE_ICE_SERVERS
   ? JSON.parse(import.meta.env.VITE_ICE_SERVERS)
   : [{ urls: 'stun:stun.l.google.com:19302' }]
 
-export class VoiceRoom {
-  private readonly events: VoiceRoomEvents
+export class VoiceChat {
+  private readonly events: VoiceEvents
   private readonly peers = new Map<string, Peer>()
-  private socket: WebSocket | null = null
+  private send: (message: ClientMessage) => void = () => {}
   private microphone: MediaStream | null = null
+  private microphoneMeter: LevelMeter | null = null
 
-  constructor(events: VoiceRoomEvents) {
+  constructor(events: VoiceEvents) {
     this.events = events
   }
 
-  /** Asks for the microphone, then connects to the room. */
-  async join(room: string, name: string): Promise<void> {
-    this.microphone = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    })
-
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-    const query = new URLSearchParams({ name })
-    const socket = new WebSocket(
-      `${scheme}://${location.host}/ws/${encodeURIComponent(room)}?${query}`,
-    )
-    this.socket = socket
-    socket.onmessage = (event) => this.handleMessage(JSON.parse(event.data))
-    socket.onclose = (event) => {
-      // leave() clears this.socket, so this only runs for unexpected closes.
-      if (this.socket !== socket) return
-      this.cleanUp()
-      this.events.onDisconnected(event.reason || 'Lost connection to the server')
+  /** Asks for the microphone. Without one, the player can still listen. */
+  async startMicrophone(): Promise<boolean> {
+    try {
+      this.microphone = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+      this.microphoneMeter = new LevelMeter(this.microphone)
+      return true
+    } catch (error) {
+      console.warn('No microphone available', error)
+      return false
     }
   }
 
-  leave(): void {
-    const socket = this.socket
-    this.cleanUp()
-    socket?.close()
+  setSender(send: (message: ClientMessage) => void): void {
+    this.send = send
+  }
+
+  stop(): void {
+    this.send = () => {}
+    for (const id of [...this.peers.keys()]) this.removePeer(id)
+    this.microphoneMeter?.disconnect()
+    this.microphoneMeter = null
+    for (const track of this.microphone?.getTracks() ?? []) track.stop()
+    this.microphone = null
   }
 
   setMuted(muted: boolean): void {
@@ -89,14 +102,17 @@ export class VoiceRoom {
     }
   }
 
-  private cleanUp(): void {
-    this.socket = null
-    for (const id of [...this.peers.keys()]) this.removePeer(id)
-    for (const track of this.microphone?.getTracks() ?? []) track.stop()
-    this.microphone = null
+  /** How loudly this player is talking right now; null means this client. */
+  level(playerId: string | null): number {
+    if (playerId === null) return this.microphoneMeter?.level() ?? 0
+    return this.peers.get(playerId)?.meter?.level() ?? 0
   }
 
-  private handleMessage(message: ServerMessage): void {
+  connectionState(playerId: string): RTCPeerConnectionState | null {
+    return this.peers.get(playerId)?.pc.connectionState ?? null
+  }
+
+  handleMessage(message: ServerMessage): void {
     switch (message.type) {
       case 'welcome':
         for (const peer of message.peers) this.addPeer(peer, true)
@@ -119,6 +135,12 @@ export class VoiceRoom {
     }
   }
 
+  resumePlayback(): void {
+    for (const { audio } of this.peers.values()) {
+      if (audio.srcObject) audio.play().catch(console.error)
+    }
+  }
+
   /**
    * Only the player who just joined makes offers. Offers can then never collide,
    * which matters because rolling back a colliding offer can leave Chrome stuck
@@ -128,19 +150,20 @@ export class VoiceRoom {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
     const audio = new Audio()
     audio.autoplay = true
-    const peer: Peer = { info, pc, audio }
+    const peer: Peer = { info, pc, audio, meter: null }
     this.peers.set(info.id, peer)
 
     pc.ontrack = ({ streams: [stream] }) => {
       audio.srcObject = stream
       audio.play().catch(() => this.events.onPlaybackBlocked())
+      peer.meter = new LevelMeter(stream)
     }
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) this.sendSignal(info.id, { candidate: candidate.toJSON() })
     }
     pc.onconnectionstatechange = () => {
       if (isOfferer && pc.connectionState === 'failed') pc.restartIce()
-      this.notifyPlayersChanged()
+      this.events.onConnectionsChanged()
     }
 
     if (isOfferer) {
@@ -153,12 +176,15 @@ export class VoiceRoom {
         }
       }
       this.addMicrophone(pc)
+      // Without a microphone there is no track to trigger negotiation, but this
+      // player still needs to hear everyone else.
+      if (!this.microphone) pc.addTransceiver('audio', { direction: 'recvonly' })
     }
-    this.notifyPlayersChanged()
+    this.events.onConnectionsChanged()
   }
 
   private addMicrophone(pc: RTCPeerConnection): void {
-    for (const track of this.microphone!.getAudioTracks()) {
+    for (const track of this.microphone?.getAudioTracks() ?? []) {
       pc.addTrack(track, this.microphone!)
     }
   }
@@ -168,8 +194,9 @@ export class VoiceRoom {
     if (!peer) return
     peer.pc.close()
     peer.audio.srcObject = null
+    peer.meter?.disconnect()
     this.peers.delete(id)
-    this.notifyPlayersChanged()
+    this.events.onConnectionsChanged()
   }
 
   private async handleSignal(peer: Peer, data: SignalData): Promise<void> {
@@ -191,24 +218,6 @@ export class VoiceRoom {
   }
 
   private sendSignal(to: string, data: SignalData): void {
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ to, data }))
-    }
-  }
-
-  private notifyPlayersChanged(): void {
-    this.events.onPlayersChanged(
-      [...this.peers.values()].map(({ info, pc }) => ({
-        ...info,
-        connection: pc.connectionState,
-      })),
-    )
-  }
-
-  /** Retries playback; call this from a user gesture. */
-  resumePlayback(): void {
-    for (const { audio } of this.peers.values()) {
-      if (audio.srcObject) audio.play().catch(console.error)
-    }
+    this.send({ type: 'signal', to, data })
   }
 }

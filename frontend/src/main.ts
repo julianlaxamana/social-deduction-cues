@@ -1,131 +1,124 @@
 import './style.css'
-import { VoiceRoom, type PlayerState } from './voice.ts'
+import { resumeAudio } from './audio.ts'
+import { RoomConnection } from './connection.ts'
+import { HUD_HTML, Hud } from './hud.ts'
+import type { RoomState, ServerMessage } from './protocol.ts'
+import { BarScene } from './scene/scene.ts'
+import { VoiceChat } from './voice.ts'
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
-<main>
-  <h1>Voice room</h1>
+document.querySelector<HTMLDivElement>('#app')!.innerHTML = HUD_HTML
 
-  <form id="join-form">
-    <label>
-      Your name
-      <input id="name" required maxlength="32" autocomplete="nickname" />
-    </label>
-    <label>
-      Room
-      <input id="room" required maxlength="64" pattern="[A-Za-z0-9_\\-]+"
-        title="Letters, numbers, hyphens and underscores" value="lobby" />
-    </label>
-    <button type="submit" id="join">Join with microphone</button>
-  </form>
+const SPEAKING_LEVEL = 0.12
 
-  <section id="in-room" hidden>
-    <ul id="players"></ul>
-    <div class="controls">
-      <button type="button" id="mute" aria-pressed="false">Mute</button>
-      <button type="button" id="leave">Leave</button>
-    </div>
-  </section>
-
-  <p id="status" role="status"></p>
-</main>
-`
-
-function element<T extends HTMLElement>(id: string): T {
-  return document.getElementById(id) as T
-}
-
-const joinForm = element<HTMLFormElement>('join-form')
-const nameInput = element<HTMLInputElement>('name')
-const roomInput = element<HTMLInputElement>('room')
-const joinButton = element<HTMLButtonElement>('join')
-const inRoom = element<HTMLElement>('in-room')
-const playerList = element<HTMLUListElement>('players')
-const muteButton = element<HTMLButtonElement>('mute')
-const leaveButton = element<HTMLButtonElement>('leave')
-const status = element<HTMLParagraphElement>('status')
-
-const CONNECTION_LABELS: Record<PlayerState['connection'], string> = {
-  new: 'Connecting…',
-  connecting: 'Connecting…',
-  connected: 'Connected',
-  disconnected: 'Reconnecting…',
-  failed: 'Connection failed',
-  closed: 'Disconnected',
-}
-
+let connection: RoomConnection | null = null
+let selfId = ''
+let roomName = ''
+let latest: RoomState | null = null
 let muted = false
+let hasMicrophone = false
 
-const voice = new VoiceRoom({
-  onPlayersChanged: renderPlayers,
-  onDisconnected(reason) {
-    showJoinForm()
-    status.textContent = reason
-  },
+const voice = new VoiceChat({
+  onConnectionsChanged: render,
   onPlaybackBlocked() {
-    status.textContent = 'Click anywhere to hear the other players.'
-    document.addEventListener(
-      'click',
-      () => {
-        voice.resumePlayback()
-        status.textContent = ''
-      },
-      { once: true },
-    )
+    hud.showToast('Click anywhere to hear the other players.', 8000)
+    document.addEventListener('click', () => voice.resumePlayback(), { once: true })
   },
 })
 
-function renderPlayers(players: PlayerState[]): void {
-  const self = document.createElement('li')
-  self.textContent = `${nameInput.value} (you)`
-  playerList.replaceChildren(
-    self,
-    ...players.map((player) => {
-      const item = document.createElement('li')
-      const state = document.createElement('span')
-      state.className = `state ${player.connection}`
-      state.textContent = CONNECTION_LABELS[player.connection]
-      item.append(player.name, state)
-      return item
-    }),
-  )
-}
-
-function setMuted(value: boolean): void {
-  muted = value
-  voice.setMuted(muted)
-  muteButton.textContent = muted ? 'Unmute' : 'Mute'
-  muteButton.setAttribute('aria-pressed', String(muted))
-}
-
-function showJoinForm(): void {
-  inRoom.hidden = true
-  joinForm.hidden = false
-  joinButton.disabled = false
-}
-
-joinForm.addEventListener('submit', async (event) => {
-  event.preventDefault()
-  joinButton.disabled = true
-  status.textContent = ''
-  try {
-    await voice.join(roomInput.value, nameInput.value)
-  } catch (error) {
-    console.error(error)
-    joinButton.disabled = false
-    status.textContent =
-      'Could not use your microphone. Check the browser permission and try again.'
-    return
-  }
-  setMuted(false)
-  renderPlayers([])
-  joinForm.hidden = true
-  inRoom.hidden = false
+const hud = new Hud({
+  onJoin: join,
+  onStart: () => connection?.send({ type: 'start' }),
+  onPlay: playSelected,
+  onCall: () => connection?.send({ type: 'call' }),
+  onToggleMute: toggleMute,
+  onLeave: () => leave(),
 })
 
-muteButton.addEventListener('click', () => setMuted(!muted))
+const scene = new BarScene(document.querySelector<HTMLCanvasElement>('#scene')!, {
+  onSelectionChanged: () => hud.setSelectedCount(scene.selectedCardIds().length),
+  voiceLevel: (playerId) => voice.level(playerId),
+})
 
-leaveButton.addEventListener('click', () => {
-  voice.leave()
-  showJoinForm()
-  status.textContent = ''
+function render(): void {
+  if (!latest) return
+  if (latest.game) {
+    hud.showGame(selfId, latest.game, latest.secondsLeft ?? 0)
+  } else {
+    hud.showLobby(roomName, selfId, latest.players, (id) => voice.connectionState(id))
+  }
+}
+
+function handleMessage(message: ServerMessage): void {
+  voice.handleMessage(message)
+  switch (message.type) {
+    case 'welcome':
+      selfId = message.id
+      break
+    case 'error':
+      hud.showToast(message.message)
+      break
+    case 'state':
+      // A newer state may already have arrived; never step backwards.
+      if (latest && message.version < latest.version) return
+      latest = message
+      scene.sync(selfId, message.players, message.game)
+      render()
+      break
+  }
+}
+
+async function join(name: string, room: string): Promise<void> {
+  resumeAudio()
+  hud.setJoining(true)
+  hasMicrophone = await voice.startMicrophone()
+  muted = false
+  hud.showMuted(muted, hasMicrophone)
+  if (!hasMicrophone) {
+    hud.showToast("No microphone: you can listen, but nobody will hear you.", 6000)
+  }
+  roomName = room
+  connection = new RoomConnection(room, name, {
+    onMessage: handleMessage,
+    onClosed: (reason) => leave(reason),
+  })
+  voice.setSender((message) => connection?.send(message))
+}
+
+function leave(reason = ''): void {
+  connection?.close()
+  connection = null
+  latest = null
+  selfId = ''
+  voice.stop()
+  scene.clear()
+  hud.showJoinForm(reason)
+}
+
+function playSelected(): void {
+  if (!hud.canPlay) return
+  connection?.send({ type: 'play', cards: scene.selectedCardIds() })
+}
+
+function toggleMute(): void {
+  if (!hasMicrophone) return
+  muted = !muted
+  voice.setMuted(muted)
+  hud.showMuted(muted, hasMicrophone)
+}
+
+setInterval(() => {
+  hud.showMicrophoneActive(!muted && voice.level(null) > SPEAKING_LEVEL)
+}, 100)
+
+addEventListener('keydown', (event) => {
+  if (!connection || event.repeat || event.target instanceof HTMLInputElement) return
+  const key = event.key.toLowerCase()
+  if (key >= '1' && key <= '5') scene.toggleCard(Number(key) - 1)
+  else if (key === 'enter') {
+    // A focused button would otherwise also treat Enter as a click on itself.
+    event.preventDefault()
+    playSelected()
+  }
+  else if (key === 'l' && hud.canCall) connection.send({ type: 'call' })
+  else if (key === 'm') toggleMute()
 })
