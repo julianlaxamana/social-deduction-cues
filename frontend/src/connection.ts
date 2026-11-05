@@ -10,9 +10,14 @@ export class RoomConnection {
   private readonly socket: WebSocket
   private closedByUs = false
 
-  constructor(room: string, name: string, events: ConnectionEvents) {
+  constructor(
+    room: string,
+    name: string,
+    saveSpeech: boolean,
+    events: ConnectionEvents,
+  ) {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-    const query = new URLSearchParams({ name })
+    const query = new URLSearchParams({ name, save_speech: String(saveSpeech) })
     this.socket = new WebSocket(
       `${scheme}://${location.host}/ws/${encodeURIComponent(room)}?${query}`,
     )
@@ -28,6 +33,10 @@ export class RoomConnection {
     if (this.socket.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify(message))
     }
+  }
+
+  sendBinary(data: ArrayBuffer): void {
+    if (this.socket.readyState === WebSocket.OPEN) this.socket.send(data)
   }
 
   close(): void {

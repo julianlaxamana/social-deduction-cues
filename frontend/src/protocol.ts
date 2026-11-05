@@ -37,12 +37,32 @@ export interface GameView {
   winnerId: string | null
 }
 
+export interface PlayerRecap extends PeerInfo {
+  outcome: 'won' | 'shot' | 'left' | 'survived'
+  plays: number
+  lies: number
+  caught: number
+  calls: number
+  correctCalls: number
+  pulls: number
+}
+
+export interface Recap {
+  id: string
+  rounds: number
+  winnerId: string | null
+  players: PlayerRecap[]
+  highlights: { title: string; text: string }[]
+  tells: string[]
+}
+
 export interface RoomState {
   type: 'state'
   version: number
   players: PeerInfo[]
   game: GameView | null
   secondsLeft: number | null
+  recap: Recap | null
 }
 
 export type SignalData =
@@ -55,6 +75,7 @@ export type ServerMessage =
   | { type: 'peer-left'; id: string }
   | { type: 'signal'; from: string; data: SignalData }
   | { type: 'error'; message: string }
+  | { type: 'caption'; playerId: string; name: string; text: string }
   | RoomState
 
 export type ClientMessage =
@@ -62,6 +83,7 @@ export type ClientMessage =
   | { type: 'start' }
   | { type: 'play'; cards: number[] }
   | { type: 'call' }
+  | { type: 'speech-end' }
 
 export const REVOLVER_CHAMBERS = 6
 export const RANK_NAMES: Record<Rank, string> = {

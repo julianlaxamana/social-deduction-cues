@@ -18,6 +18,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from captions import BYTES_PER_SECOND, load_model, transcribe
 from game import Game, IllegalMove, Phase
+from game_log import GameLog
+from recap import build_recap
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,8 @@ class Peer:
     id: str
     name: str
     socket: WebSocket
+    # Whether this player agreed to have their words saved in the game log.
+    save_speech: bool = False
     speech: bytearray = field(default_factory=bytearray)
 
     def info(self) -> dict[str, str]:
@@ -60,8 +64,12 @@ class Peer:
 
 @dataclass(eq=False)
 class Room:
+    id: str
     peers: dict[str, Peer] = field(default_factory=dict)
     game: Game | None = None
+    log: GameLog | None = None
+    # Stats from the last game, until the next one starts.
+    recap: dict | None = None
     timer: asyncio.Task | None = None
     # Lets clients discard a state update that overtook a newer one.
     version: int = 0
@@ -97,7 +105,10 @@ async def run_phase_timer(room: Room) -> None:
     # This task is finishing, so sync_room must not cancel it.
     room.timer = None
     if room.game.phase is Phase.OVER:
+        # Once more, to include anything that was still being transcribed.
+        room.recap = build_recap(room.log.events)
         room.game = None
+        room.log = None
     elif room.game.phase is Phase.PLAYING:
         room.game.timeout()
     else:
@@ -112,6 +123,8 @@ async def sync_room(room: Room) -> None:
         room.timer = None
     if room.game:
         room.timer = asyncio.create_task(run_phase_timer(room))
+        if room.game.phase is Phase.OVER:
+            room.recap = build_recap(room.log.events)
 
     room.version += 1
     players = [peer.info() for peer in room.peers.values()]
@@ -125,6 +138,7 @@ async def sync_room(room: Room) -> None:
                     "players": players,
                     "game": room.game and room.game.view_for(peer.id),
                     "secondsLeft": room.game and PHASE_SECONDS[room.game.phase],
+                    "recap": room.recap,
                 },
             )
             for peer in room.peers.values()
@@ -142,7 +156,12 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
                     raise IllegalMove(
                         f"Need at least {MIN_PLAYERS_TO_START} players to start"
                     )
-                room.game = Game([(p.id, p.name) for p in room.peers.values()])
+                room.recap = None
+                room.log = GameLog(room.id)
+                room.game = Game(
+                    [(p.id, p.name) for p in room.peers.values()],
+                    on_event=room.log.write,
+                )
             case "play" if room.game:
                 room.game.play(peer.id, message.get("cards"))
             case "call" if room.game:
@@ -155,7 +174,9 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
     await sync_room(room)
 
 
-async def caption_speech(room: Room, peer: Peer, pcm: bytes) -> None:
+async def caption_speech(
+    room: Room, peer: Peer, pcm: bytes, log: GameLog | None, end: float
+) -> None:
     try:
         async with transcribe_lock:
             text = await asyncio.to_thread(transcribe, pcm)
@@ -164,6 +185,8 @@ async def caption_speech(room: Room, peer: Peer, pcm: bytes) -> None:
         await send(peer, {"type": "error", "message": "Captions are unavailable"})
         return
     if text:
+        if log and peer.save_speech:
+            log.write_speech(peer.id, end - len(pcm) / BYTES_PER_SECOND, end, text)
         caption = {"type": "caption", "playerId": peer.id, "name": peer.name, "text": text}
         await asyncio.gather(*(send(other, caption) for other in room.peers.values()))
 
@@ -176,7 +199,11 @@ def finish_speech(room: Room, peer: Peer) -> None:
     if len(caption_tasks) >= MAX_PENDING_CAPTIONS:
         logger.warning("Dropping speech: too many captions are waiting")
         return
-    task = asyncio.create_task(caption_speech(room, peer, pcm))
+    # Noted now, because the game may have moved on by the time this is
+    # transcribed. Speech still belongs to the game it was said in.
+    log = room.log
+    end = log.now() if log else 0.0
+    task = asyncio.create_task(caption_speech(room, peer, pcm, log, end))
     caption_tasks.add(task)
     task.add_done_callback(caption_tasks.discard)
 
@@ -213,7 +240,9 @@ async def handle_messages(room: Room, peer: Peer) -> None:
 
 
 @app.websocket("/ws/{room_id}")
-async def game_room(socket: WebSocket, room_id: str, name: str = "Player") -> None:
+async def game_room(
+    socket: WebSocket, room_id: str, name: str = "Player", save_speech: bool = False
+) -> None:
     # Accept before rejecting: a browser only sees the close reason of an
     # established connection.
     await socket.accept()
@@ -221,10 +250,12 @@ async def game_room(socket: WebSocket, room_id: str, name: str = "Player") -> No
         await socket.close(CLOSE_INVALID_ROOM, "Invalid room name")
         return
 
-    peer = Peer(uuid4().hex, name.strip()[:MAX_NAME_LENGTH] or "Player", socket)
+    peer = Peer(
+        uuid4().hex, name.strip()[:MAX_NAME_LENGTH] or "Player", socket, save_speech
+    )
 
     async with join_lock:
-        room = rooms.get(room_id) or Room()
+        room = rooms.get(room_id) or Room(room_id)
         if room.game:
             await socket.close(CLOSE_GAME_IN_PROGRESS, "That table is mid-game")
             return
@@ -250,9 +281,9 @@ async def game_room(socket: WebSocket, room_id: str, name: str = "Player") -> No
         pass
     finally:
         del room.peers[peer.id]
+        if room.game:
+            room.game.remove_player(peer.id)
         if room.peers:
-            if room.game:
-                room.game.remove_player(peer.id)
             await broadcast(room, {"type": "peer-left", "id": peer.id}, peer)
             await sync_room(room)
         else:

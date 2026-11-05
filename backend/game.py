@@ -8,6 +8,7 @@ Everything secret lives here, and `view_for` decides what each player may see.
 """
 
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -71,8 +72,14 @@ class Shot:
 
 class Game:
     def __init__(
-        self, players: list[tuple[str, str]], rng: random.Random | None = None
+        self,
+        players: list[tuple[str, str]],
+        rng: random.Random | None = None,
+        on_event: Callable[..., None] | None = None,
     ) -> None:
+        # Called with an event name and its details whenever something happens.
+        self.on_event = on_event or (lambda event, **fields: None)
+        self.auto_move = False
         # Card shuffles and bullets are the stakes, so use an unguessable source.
         self.rng = rng or random.SystemRandom()
         self.players = [
@@ -82,6 +89,10 @@ class Game:
         self.round = 0
         self.play_seq = 0
         self.winner_id: str | None = None
+        self.on_event(
+            "game-start",
+            players=[{"id": player.id, "name": player.name} for player in self.players],
+        )
         self._start_round(0)
 
     @property
@@ -119,16 +130,25 @@ class Game:
             player_id, tuple(hand[id] for id in card_ids), self.play_seq
         )
         self._pass_turn()
+        self.on_event(
+            "play",
+            round=self.round,
+            playerId=player_id,
+            ranks=[card.rank for card in self.last_play.cards],
+            lied=self._is_lie(self.last_play),
+            cardsLeft=len(hand) - len(card_ids),
+            nextPlayerId=self.current.id,
+            auto=self.auto_move,
+        )
 
     def call_liar(self, player_id: str) -> None:
         self._require_turn(player_id)
         if self.last_play is None:
             raise IllegalMove("There is nothing to call yet")
 
+        forced = self.must_call
         accused_id = self.last_play.player_id
-        lied = any(
-            card.rank not in (self.table_rank, JOKER) for card in self.last_play.cards
-        )
+        lied = self._is_lie(self.last_play)
         self.reveal = Reveal(
             caller_id=player_id,
             accused_id=accused_id,
@@ -137,13 +157,26 @@ class Game:
             loser_id=accused_id if lied else player_id,
         )
         self.phase = Phase.REVEAL
+        self.on_event(
+            "call",
+            round=self.round,
+            callerId=player_id,
+            accusedId=accused_id,
+            ranks=list(self.reveal.ranks),
+            lied=lied,
+            loserId=self.reveal.loser_id,
+            forced=forced,
+            auto=self.auto_move,
+        )
 
     def timeout(self) -> None:
         """The current player ran out of time: make the least committal move."""
+        self.auto_move = True
         if self.must_call:
             self.call_liar(self.current.id)
         else:
             self.play(self.current.id, [self.rng.choice(self.current.hand).id])
+        self.auto_move = False
 
     def advance(self) -> None:
         """Moves on from a phase that only exists to be watched."""
@@ -160,6 +193,7 @@ class Game:
         index = self._player_index(player_id)
         self.players[index].alive = False
         self.players[index].hand = []
+        self.on_event("player-left", round=self.round, playerId=player_id)
 
         if self.phase is Phase.OVER:
             return
@@ -214,6 +248,9 @@ class Game:
             "winnerId": self.winner_id,
         }
 
+    def _is_lie(self, play: Play) -> bool:
+        return any(card.rank not in (self.table_rank, JOKER) for card in play.cards)
+
     def _require_turn(self, player_id: str) -> None:
         if self.phase is not Phase.PLAYING or self.current.id != player_id:
             raise IllegalMove("It isn't your turn")
@@ -235,6 +272,16 @@ class Game:
         deck = iter(Card(id, rank) for id, rank in enumerate(ranks))
         for player in self.players:
             player.hand = [next(deck) for _ in range(HAND_SIZE)] if player.alive else []
+        self.on_event(
+            "round-start",
+            round=self.round,
+            tableRank=self.table_rank,
+            firstPlayerId=self.current.id,
+            hands={
+                player.id: [card.rank for card in player.hand]
+                for player in self.alive
+            },
+        )
 
     def _next_index(self, index: int, condition) -> int:
         count = len(self.players)
@@ -258,6 +305,9 @@ class Game:
             loser.hand = []
         self.shot = Shot(loser.id, fired)
         self.phase = Phase.SHOT
+        self.on_event(
+            "shot", round=self.round, playerId=loser.id, fired=fired, pull=loser.shots
+        )
 
     def _next_round_after(self, index: int) -> None:
         """The player at `index` starts the next round, or the next player
@@ -273,3 +323,4 @@ class Game:
     def _finish(self) -> None:
         self.winner_id = self.alive[0].id if self.alive else None
         self.phase = Phase.OVER
+        self.on_event("game-over", round=self.round, winnerId=self.winner_id)

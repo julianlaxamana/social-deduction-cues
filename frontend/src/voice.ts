@@ -83,6 +83,10 @@ export class VoiceChat {
     }
   }
 
+  get microphoneStream(): MediaStream | null {
+    return this.microphone
+  }
+
   setSender(send: (message: ClientMessage) => void): void {
     this.send = send
   }

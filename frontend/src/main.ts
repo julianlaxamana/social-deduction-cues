@@ -1,5 +1,6 @@
 import './style.css'
 import { resumeAudio } from './audio.ts'
+import { SpeechCapture } from './captions.ts'
 import { RoomConnection } from './connection.ts'
 import { HUD_HTML, Hud } from './hud.ts'
 import type { RoomState, ServerMessage } from './protocol.ts'
@@ -16,6 +17,7 @@ let roomName = ''
 let latest: RoomState | null = null
 let muted = false
 let hasMicrophone = false
+let captionsEnabled = true
 
 const voice = new VoiceChat({
   onConnectionsChanged: render,
@@ -25,12 +27,18 @@ const voice = new VoiceChat({
   },
 })
 
+const speech = new SpeechCapture({
+  onAudio: (pcm) => connection?.sendBinary(pcm),
+  onSpeechEnd: () => connection?.send({ type: 'speech-end' }),
+})
+
 const hud = new Hud({
   onJoin: join,
   onStart: () => connection?.send({ type: 'start' }),
   onPlay: playSelected,
   onCall: () => connection?.send({ type: 'call' }),
   onToggleMute: toggleMute,
+  onToggleCaptions: toggleCaptions,
   onLeave: () => leave(),
 })
 
@@ -46,6 +54,7 @@ function render(): void {
   } else {
     hud.showLobby(roomName, selfId, latest.players, (id) => voice.connectionState(id))
   }
+  hud.showRecap(latest.recap, selfId)
 }
 
 function handleMessage(message: ServerMessage): void {
@@ -57,6 +66,9 @@ function handleMessage(message: ServerMessage): void {
     case 'error':
       hud.showToast(message.message)
       break
+    case 'caption':
+      if (captionsEnabled) hud.addCaption(message.name, message.text)
+      break
     case 'state':
       // A newer state may already have arrived; never step backwards.
       if (latest && message.version < latest.version) return
@@ -67,7 +79,11 @@ function handleMessage(message: ServerMessage): void {
   }
 }
 
-async function join(name: string, room: string): Promise<void> {
+async function join(
+  name: string,
+  room: string,
+  saveSpeech: boolean,
+): Promise<void> {
   resumeAudio()
   hud.setJoining(true)
   hasMicrophone = await voice.startMicrophone()
@@ -77,11 +93,15 @@ async function join(name: string, room: string): Promise<void> {
     hud.showToast("No microphone: you can listen, but nobody will hear you.", 6000)
   }
   roomName = room
-  connection = new RoomConnection(room, name, {
+  connection = new RoomConnection(room, name, saveSpeech, {
     onMessage: handleMessage,
     onClosed: (reason) => leave(reason),
   })
   voice.setSender((message) => connection?.send(message))
+  hud.showCaptionsEnabled(captionsEnabled)
+  const stream = voice.microphoneStream
+  // Captions are a bonus: the game and voice chat carry on without them.
+  if (stream) speech.start(stream).catch(console.error)
 }
 
 function leave(reason = ''): void {
@@ -89,6 +109,7 @@ function leave(reason = ''): void {
   connection = null
   latest = null
   selfId = ''
+  speech.stop()
   voice.stop()
   scene.clear()
   hud.showJoinForm(reason)
@@ -110,6 +131,12 @@ setInterval(() => {
   hud.showMicrophoneActive(!muted && voice.level(null) > SPEAKING_LEVEL)
 }, 100)
 
+function toggleCaptions(): void {
+  captionsEnabled = !captionsEnabled
+  speech.enabled = captionsEnabled
+  hud.showCaptionsEnabled(captionsEnabled)
+}
+
 addEventListener('keydown', (event) => {
   if (!connection || event.repeat || event.target instanceof HTMLInputElement) return
   const key = event.key.toLowerCase()
@@ -121,4 +148,5 @@ addEventListener('keydown', (event) => {
   }
   else if (key === 'l' && hud.canCall) connection.send({ type: 'call' })
   else if (key === 'm') toggleMute()
+  else if (key === 'c') toggleCaptions()
 })
