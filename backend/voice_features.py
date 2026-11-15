@@ -1,21 +1,29 @@
 """Measures how players speak, to compare each utterance with their usual voice."""
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import log2
 
 import numpy as np
 import parselmouth as pm
 
-from captions import SAMPLE_RATE, Word
+from captions import SAMPLE_RATE
 
 MIN_VOICED_FRAMES = 30  # About 0.3 s of voiced speech at Praat's 10 ms time step.
 
-# A gap between words at least this long is a pause rather than normal rhythm.
+# Loudness is judged in slices this long, to find where the talking stops.
+SLICE_SECONDS = 0.01
+# A slice this much quieter than the loudest one is silence, as in Praat.
+SILENCE_DB = 25.0
+# Silence at least this long is a pause; the gaps inside words are shorter.
 PAUSE_SECONDS = 0.3
-# Fewer words than this are over too quickly to time.
+# Less sound than this is too little to time.
+MIN_SOUNDING_SECONDS = 0.3
+# Fewer words than this are over too quickly for a speed to mean much.
 MIN_WORDS_FOR_SPEED = 3
+
+FILLERS = {"um", "umm", "uh", "uhh", "uhm", "er", "erm", "hmm", "mm"}
 
 # Readings stay "calibrating" until a player has this many of them.
 MIN_BASELINE_UTTERANCES = 5
@@ -28,6 +36,10 @@ def _semitones(value: float, usual: float) -> float:
 
 def _percent(value: float, usual: float) -> float:
     return (value / usual - 1) * 100 if usual > 0 else 0.0
+
+
+def _points(value: float, usual: float) -> float:
+    return value - usual
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,8 @@ FEATURES = {
     "pitch": Feature(_semitones, noticeable=1.5, digits=0),
     # Syllables per second while talking, compared in percent.
     "speed": Feature(_percent, noticeable=15),
+    # Percent of the utterance spent silent, compared in percentage points.
+    "pauses": Feature(_points, noticeable=15, digits=0),
 }
 
 
@@ -59,48 +73,68 @@ def _pitch(sound: pm.Sound) -> float | None:
     return float(np.median(voiced))
 
 
-def measure_voice(pcm: bytes) -> dict[str, float]:
+def _timing(samples: np.ndarray) -> tuple[float, float] | None:
     """
-    Measures the sound of an utterance.
+    Seconds spent talking and pausing, between the first and last sound.
 
-    Parameters:
-    pcm (bytes): 16 kHz 16-bit mono PCM audio.
-
-    Returns:
-    dict: A value for each of FEATURES that could be measured from the sound.
-    Nothing can be when too little of it was voiced.
+    This listens for silence rather than using Whisper's word timings, which
+    stretch the neighbouring words over a pause instead of leaving a gap.
     """
-    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64) / 32768
-    sound = pm.Sound(samples, sampling_frequency=SAMPLE_RATE)
+    size = int(SAMPLE_RATE * SLICE_SECONDS)
+    slices = samples[: len(samples) // size * size].reshape(-1, size)
+    if len(slices) == 0:
+        return None
+    power = (slices**2).mean(axis=1)
+    if power.max() == 0:
+        return None
+    sounding = power > power.max() / 10 ** (SILENCE_DB / 10)
+    (indexes,) = np.nonzero(sounding)
+    if len(indexes) * SLICE_SECONDS < MIN_SOUNDING_SECONDS:
+        return None
 
-    measured = {}
-    hz = _pitch(sound)
-    if hz is not None:
-        measured["pitch"] = hz
-    return measured
+    paused = 0.0
+    for gap in np.diff(indexes) - 1:
+        if gap * SLICE_SECONDS >= PAUSE_SECONDS:
+            paused += gap * SLICE_SECONDS
+    span = float(indexes[-1] - indexes[0] + 1) * SLICE_SECONDS
+    return span - paused, float(paused)
 
 
 def _syllables(word: str) -> int:
     """A rough count, which is enough to stop long words looking like slow speech."""
-    word = word.lower()
     count = len(re.findall(r"[aeiouy]+", word))
     if count > 1 and word.endswith("e") and not word.endswith("le"):
         count -= 1  # A final "e" is usually silent.
     return max(1, count)
 
 
-def measure_delivery(words: Sequence[Word]) -> dict[str, float]:
-    """Measures the timing of an utterance, from when each word was said."""
-    measured = {}
-    if len(words) < 2:
-        return measured
+def measure_voice(pcm: bytes, text: str = "") -> dict[str, float]:
+    """
+    Measures how an utterance was spoken.
 
-    gaps = [after.start - before.end for before, after in zip(words, words[1:])]
-    paused = sum(gap for gap in gaps if gap >= PAUSE_SECONDS)
-    # Pauses are left out, so that hesitating doesn't also count as talking slowly.
-    talking = words[-1].end - words[0].start - paused
-    if len(words) >= MIN_WORDS_FOR_SPEED and talking > 0:
-        measured["speed"] = sum(_syllables(word.text) for word in words) / talking
+    Parameters:
+    pcm (bytes): 16 kHz 16-bit mono PCM audio.
+    text (str): The words Whisper heard in it.
+
+    Returns:
+    dict: A value for each of FEATURES that could be measured, and `fillers`,
+    the number of times the player said "um" or similar.
+    """
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64) / 32768
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    measured = {"fillers": sum(word in FILLERS for word in words)}
+
+    hz = _pitch(pm.Sound(samples, sampling_frequency=SAMPLE_RATE))
+    if hz is not None:
+        measured["pitch"] = hz
+
+    timing = _timing(samples)
+    if timing:
+        talking, paused = timing
+        measured["pauses"] = paused / (talking + paused) * 100
+        # Pauses are left out, so that hesitating doesn't also count as slow.
+        if len(words) >= MIN_WORDS_FOR_SPEED:
+            measured["speed"] = sum(map(_syllables, words)) / talking
     return measured
 
 
@@ -112,16 +146,19 @@ class VoiceBaseline:
 
     def compare(self, measured: dict[str, float]) -> dict:
         """Compares an utterance with the player's earlier ones, then remembers it."""
-        return {
+        readings = {
             name: self._reading(name, measured[name]) if name in measured else None
             for name in FEATURES
         }
+        # Not compared with a baseline: most utterances have none at all.
+        return readings | {"fillers": int(measured.get("fillers", 0))}
 
     def _reading(self, name: str, value: float) -> dict:
         feature = FEATURES[name]
         history = self.history.setdefault(name, [])
         reading = {
-            "value": round(value, feature.digits),
+            # Rounding to no digits gives a whole number rather than e.g. 94.0.
+            "value": round(value, feature.digits or None),
             "change": None,
             "trend": "calibrating",
         }

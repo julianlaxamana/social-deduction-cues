@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from captions import BYTES_PER_SECOND, Transcript, Word
+from captions import BYTES_PER_SECOND
 
 
 @pytest.fixture
@@ -12,7 +12,7 @@ def spoken(monkeypatch):
 
     def fake_transcribe(pcm):
         received.append(pcm)
-        return Transcript("three kings")
+        return "three kings"
 
     monkeypatch.setattr(main, "transcribe", fake_transcribe)
     return received
@@ -47,35 +47,56 @@ def calibrating(value):
     return {"value": value, "change": None, "trend": "calibrating"}
 
 
-def test_captions_say_how_the_speaker_sounded(monkeypatch):
-    # Three one-syllable words in a second and a half of talking.
-    words = (Word("I", 0.0, 0.5), Word("played", 0.5, 1.0), Word("kings", 1.0, 1.5))
-    monkeypatch.setattr(main, "transcribe", lambda _pcm: Transcript("I played kings", words))
-    monkeypatch.setattr(main, "measure_voice", lambda _pcm: {"pitch": 180.0})
+def test_captions_say_how_the_speaker_sounded(spoken, monkeypatch):
+    heard = []
+
+    def fake_measure(pcm, text):
+        heard.append((pcm, text))
+        return {"pitch": 180.0, "speed": 4.26, "fillers": 1}
+
+    monkeypatch.setattr(main, "measure_voice", fake_measure)
     with TestClient(main.app) as client:
         with client.websocket_connect("/ws/voice-table?name=Ann") as ann:
             with client.websocket_connect("/ws/voice-table?name=Bo") as bo:
-                ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
+                audio = b"\x01\x00" * BYTES_PER_SECOND
+                ann.send_bytes(audio)
                 ann.send_json({"type": "speech-end"})
                 for socket in (ann, bo):
                     voice = receive_until(socket, "caption")["voice"]
                     assert voice["pitch"] == calibrating(180)
-                    assert voice["speed"] == calibrating(2.0)
+                    assert voice["speed"] == calibrating(4.3)
+                    assert voice["fillers"] == 1
+    assert heard == [(audio, "three kings")]
 
 
 def test_what_cannot_be_measured_is_left_out(spoken):
     with TestClient(main.app) as client:
         with client.websocket_connect("/ws/flat-table?name=Ann") as ann:
-            # A constant signal has no pitch, and the fake transcript no timings.
+            # A constant signal has no pitch, and two words are too few to time.
             ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
             ann.send_json({"type": "speech-end"})
             voice = receive_until(ann, "caption")["voice"]
             assert voice["pitch"] is None
             assert voice["speed"] is None
+            assert voice["fillers"] == 0
+
+
+def test_sounds_without_words_are_not_measured(monkeypatch):
+    measured = []
+    monkeypatch.setattr(main, "transcribe", lambda _pcm: "")
+    monkeypatch.setattr(main, "measure_voice", lambda *args: measured.append(args) or {})
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/ws/cough-table?name=Ann") as ann:
+            ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
+            ann.send_json({"type": "speech-end"})
+            # A later message still works, proving the speech was dealt with.
+            ann.send_json({"type": "start"})
+            assert receive_until(ann, "error")["message"].startswith("Need at least")
+    assert measured == []
 
 
 def test_measuring_failure_does_not_stop_captions(spoken, monkeypatch):
-    def broken(_pcm):
+    def broken(_pcm, _text):
         raise RuntimeError("praat failed")
 
     monkeypatch.setattr(main, "measure_voice", broken)

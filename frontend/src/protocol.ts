@@ -73,10 +73,13 @@ export interface VoiceReading {
   trend: 'calibrating' | 'higher' | 'lower' | 'steady'
 }
 
-export type VoiceFeature = 'pitch' | 'speed'
+export type VoiceFeature = 'pitch' | 'speed' | 'pauses'
 
 /** A reading is null when that feature could not be measured. */
-export type VoiceReadings = Record<VoiceFeature, VoiceReading | null>
+export type VoiceReadings = Record<VoiceFeature, VoiceReading | null> & {
+  /** How many times the speaker said "um" or similar. */
+  fillers: number
+}
 
 export type SignalData =
   | { description: RTCSessionDescriptionInit }

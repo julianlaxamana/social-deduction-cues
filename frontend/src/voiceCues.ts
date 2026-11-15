@@ -28,6 +28,14 @@ const CUES: Cue[] = [
     unit: ' syllables/s',
     changeUnit: '%',
   },
+  {
+    feature: 'pauses',
+    name: 'Pauses',
+    higher: '▲ pauses',
+    lower: '▼ pauses',
+    unit: '% of the time',
+    changeUnit: ' points',
+  },
 ]
 
 function tag(text: string, trend: string): HTMLSpanElement {
@@ -60,6 +68,11 @@ export function voiceCues(name: string, voice: VoiceReadings): HTMLSpanElement |
     )
     if (reading.trend === 'higher') tags.push(tag(cue.higher, 'higher'))
     if (reading.trend === 'lower') tags.push(tag(cue.lower, 'lower'))
+  }
+
+  if (voice.fillers > 0) {
+    tags.push(tag(voice.fillers > 1 ? `um ×${voice.fillers}` : 'um', 'filler'))
+    details.push(`Said "um" or "uh": ${voice.fillers}`)
   }
 
   if (details.length === 0) return null

@@ -1,7 +1,6 @@
 """Turns players' speech into text with Whisper. Audio is never stored."""
 
 import os
-from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
@@ -17,21 +16,6 @@ GAME_WORDS = "Queens, Kings, Aces, Joker, liar, bluff, revolver"
 MAX_NO_SPEECH_PROBABILITY = 0.6
 
 
-@dataclass(frozen=True)
-class Word:
-    text: str
-    # Seconds from the start of the audio.
-    start: float
-    end: float
-
-
-@dataclass(frozen=True)
-class Transcript:
-    text: str
-    # When each word was said, for measuring talking speed and pauses.
-    words: tuple[Word, ...] = ()
-
-
 @lru_cache(maxsize=1)
 def load_model():
     """Loads the model, downloading it the first time it is ever used."""
@@ -40,8 +24,8 @@ def load_model():
     return WhisperModel(MODEL_NAME, device="cpu", compute_type="int8")
 
 
-def transcribe(pcm: bytes) -> Transcript:
-    """Returns the words spoken in the audio; the text is empty if none were."""
+def transcribe(pcm: bytes) -> str:
+    """Returns the words spoken in the audio, or an empty string if none were."""
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
     segments, _ = load_model().transcribe(
         samples,
@@ -51,16 +35,9 @@ def transcribe(pcm: bytes) -> Transcript:
         vad_filter=True,
         condition_on_previous_text=False,
         hotwords=GAME_WORDS,
-        word_timestamps=True,
     )
-    spoken = [
-        segment for segment in segments if segment.no_speech_prob < MAX_NO_SPEECH_PROBABILITY
-    ]
-    return Transcript(
-        " ".join(segment.text.strip() for segment in spoken).strip(),
-        tuple(
-            Word(word.word.strip(), word.start, word.end)
-            for segment in spoken
-            for word in segment.words or ()
-        ),
-    )
+    return " ".join(
+        segment.text.strip()
+        for segment in segments
+        if segment.no_speech_prob < MAX_NO_SPEECH_PROBABILITY
+    ).strip()

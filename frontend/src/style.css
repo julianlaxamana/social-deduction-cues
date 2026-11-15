@@ -446,6 +446,10 @@ button.active {
   color: #8ec5ff;
 }
 
+#captions .cue-filler {
+  color: var(--gold);
+}
+
 #toast {
   position: absolute;
   bottom: 96px;
