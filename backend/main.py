@@ -18,7 +18,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ai_summary import SummaryUnavailable, summarize
-from captions import BYTES_PER_SECOND, load_model, transcribe
+from captions import BYTES_PER_SECOND, Transcription, load_model, transcribe
 from game import Game, IllegalMove, Phase
 from game_log import GameLog
 from gemini_judgment import insufficient, judge_play
@@ -52,8 +52,15 @@ MAX_SPEECH_BYTES = BYTES_PER_SECOND * 10
 # server has this many utterances waiting.
 MAX_PENDING_CAPTIONS = 8
 MAX_PENDING_JUDGMENTS = 8
-CLAIM_LOOKBACK_SECONDS = 6.0
-CLAIM_WAIT_SECONDS = 1.5
+CLAIM_LOOKBACK_SECONDS = 8.0
+CLAIM_WAIT_SECONDS = 2.5
+
+
+@dataclass(frozen=True)
+class ClaimEvidence:
+    transcription: Transcription
+    features: dict[str, float]
+    baseline: dict
 
 
 @dataclass(frozen=True)
@@ -61,7 +68,7 @@ class Claim:
     # The server validates this turn before accepting any audio as evidence.
     turn: tuple[str, int, int]
     started: float
-    evidence: asyncio.Future[tuple[str, dict[str, float]] | None]
+    evidence: asyncio.Future[ClaimEvidence | None]
 
 
 @dataclass(eq=False)
@@ -77,6 +84,7 @@ class Peer:
     # Kept for the whole connection, so it carries over between games.
     voice_baseline: VoiceBaseline = field(default_factory=VoiceBaseline)
     gemini_analysis: bool = False
+    captions_enabled: bool = True
     pending_claim: Claim | None = None
     latest_claim: Claim | None = None
 
@@ -98,6 +106,8 @@ class Room:
     ai_consent: bool = False
     summary_task: asyncio.Task | None = None
     timer: asyncio.Task | None = None
+    deadline: float = 0.0
+    play_reference: dict | None = None
     # Lets clients discard a state update that overtook a newer one.
     version: int = 0
 
@@ -138,7 +148,10 @@ async def run_phase_timer(room: Room) -> None:
         room.game = None
         room.log = None
     elif room.game.phase is Phase.PLAYING:
+        previous_seq = room.game.play_seq
         room.game.timeout()
+        await sync_after_action(room, previous_seq, automatic=True)
+        return
     else:
         room.game.advance()
     await sync_room(room)
@@ -181,6 +194,7 @@ async def sync_room(room: Room) -> None:
         room.timer.cancel()
         room.timer = None
     if room.game:
+        room.deadline = asyncio.get_running_loop().time() + PHASE_SECONDS[room.game.phase]
         room.timer = asyncio.create_task(run_phase_timer(room))
         if room.game.phase is Phase.OVER:
             room.recap = build_recap(room.log.events)
@@ -201,7 +215,10 @@ async def send_state(room: Room) -> None:
                     "players": players,
                     "gameId": room.log.id if room.game else None,
                     "game": room.game and room.game.view_for(peer.id),
-                    "secondsLeft": room.game and PHASE_SECONDS[room.game.phase],
+                    "secondsLeft": room.game and max(
+                        0, room.deadline - asyncio.get_running_loop().time(),
+                    ),
+                    "playReference": room.play_reference if peer.gemini_analysis and current_reference(room) else None,
                     "recap": room.recap and {**room.recap, "ai": room.ai_summary},
                 },
             )
@@ -211,7 +228,6 @@ async def send_state(room: Room) -> None:
 
 
 async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
-    judgment = None
     try:
         match message.get("type"):
             case "start":
@@ -222,6 +238,7 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
                         f"Need at least {MIN_PLAYERS_TO_START} players to start"
                     )
                 room.recap = None
+                room.play_reference = None
                 cancel_summary(room)
                 room.ai_consent = all(p.ai_recap for p in room.peers.values())
                 room.log = GameLog(room.id)
@@ -230,22 +247,10 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
                     on_event=room.log.write,
                 )
             case "play" if room.game:
-                log = room.log
-                game = room.game
-                turn = (log.id, game.round, game.play_seq)
+                previous_seq = room.game.play_seq
                 room.game.play(peer.id, message.get("cards"))
-                if peer.gemini_analysis and len(judgment_tasks) < MAX_PENDING_JUDGMENTS:
-                    claim = peer.latest_claim
-                    peer.latest_claim = None
-                    if claim and (
-                        claim.turn != turn
-                        or log.now() - claim.started > CLAIM_LOOKBACK_SECONDS
-                    ):
-                        claim = None
-                    judgment = (
-                        log, peer, game.round, game.last_play.seq, game.table_rank,
-                        len(game.last_play.cards), claim, log.now(),
-                    )
+                await sync_after_action(room, previous_seq, automatic=False)
+                return
             case "call" if room.game:
                 room.game.call_liar(peer.id)
             case _:
@@ -254,57 +259,111 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
         await send(peer, {"type": "error", "message": str(error)})
         return
     await sync_room(room)
-    # Send the face-down play state before a reference can reach the clients.
-    if judgment and len(judgment_tasks) < MAX_PENDING_JUDGMENTS:
-        task = asyncio.create_task(record_judgment(room, *judgment))
+
+
+def current_reference(room: Room) -> bool:
+    game, log, reference = room.game, room.log, room.play_reference
+    return bool(
+        game and log and reference and game.phase is Phase.PLAYING
+        and game.last_play and reference["gameId"] == log.id
+        and reference["round"] == game.round and reference["playSeq"] == game.last_play.seq
+    )
+
+
+async def sync_after_action(room: Room, previous_seq: int, *, automatic: bool) -> None:
+    game, log = room.game, room.log
+    if game.play_seq == previous_seq or not any(peer.gemini_analysis for peer in room.peers.values()):
+        await sync_room(room)
+        return
+
+    play = game.last_play
+    peer = room.peers[play.player_id]
+    turn = (log.id, game.round, previous_seq)
+    claim = peer.latest_claim if peer.gemini_analysis else None
+    peer.latest_claim = None
+    if claim and (claim.turn != turn or log.now() - claim.started > CLAIM_LOOKBACK_SECONDS):
+        claim = None
+    if claim and peer.pending_claim is claim and peer.speech:
+        # The server can finish the buffered audio even when the timer played the cards.
+        finish_speech(room, peer)
+
+    reference = {
+        "gameId": log.id, "round": game.round, "playSeq": play.seq, "status": "analyzing",
+    }
+    room.play_reference = reference
+    played_at = log.now()
+    if len(judgment_tasks) >= MAX_PENDING_JUDGMENTS:
+        reference["status"] = "unavailable"
+        log.write(
+            "play-judgment", playerId=peer.id, playSeq=play.seq, judgment="insufficient_evidence",
+            diagnostic="over_capacity", metrics=[], elapsedMs=0, published=True,
+        )
+    else:
+        task = asyncio.create_task(record_judgment(
+            room, log, peer.id, reference, game.table_rank, len(play.cards), claim,
+            played_at, automatic,
+        ))
         judgment_tasks.add(task)
         task.add_done_callback(judgment_tasks.discard)
+    await sync_room(room)
 
 
 async def record_judgment(
-    room: Room, log: GameLog, peer: Peer, round_number: int, play_seq: int,
-    table_rank: str, card_count: int, claim: Claim | None, played_at: float,
+    room: Room, log: GameLog, player_id: str, reference: dict, table_rank: str,
+    card_count: int, claim: Claim | None, played_at: float, automatic: bool,
 ) -> None:
     def still_callable() -> bool:
-        game = room.game
-        return (
-            room.log is log and game is not None and game.phase is Phase.PLAYING
-            and game.round == round_number and game.last_play is not None
-            and game.last_play.seq == play_seq and peer.id in room.peers
-        )
+        return room.play_reference is reference and current_reference(room) and player_id in room.peers
 
     evidence = None
+    diagnostic = "no_matching_speech"
     if claim:
         try:
             evidence = await asyncio.wait_for(
                 asyncio.shield(claim.evidence), CLAIM_WAIT_SECONDS,
             )
         except TimeoutError:
-            pass
-    if evidence and still_callable():
-        transcript, features = evidence
-        result = await judge_play(
+            diagnostic = "transcript_timeout"
+    if evidence and not evidence.transcription.reliable:
+        diagnostic = "uncertain_transcript"
+        evidence = None
+    if not still_callable():
+        attempt = insufficient("The play is no longer callable.", "stale_play")
+    elif evidence or automatic:
+        attempt = await judge_play(
             table_rank=table_rank, card_count=card_count,
-            transcript=transcript, speech_features=features,
+            transcript=evidence.transcription.text if evidence else None,
+            speech_features=evidence.features if evidence else {},
+            baseline=evidence.baseline if evidence else None,
+            automatic=automatic,
         )
     else:
-        result = insufficient("No relevant speech was available.")
+        attempt = insufficient("No reliable speech was available.", diagnostic)
+    result = attempt.result
+    play_seq = reference["playSeq"]
     log.judgments[play_seq] = result
     elapsed_ms = round((log.now() - played_at) * 1000)
-    publish = result.judgment != "insufficient_evidence" and still_callable()
+    publish = still_callable()
     log.write(
-        "play-judgment", playerId=peer.id, playSeq=play_seq, judgment=result.judgment,
-        elapsedMs=elapsed_ms, published=publish,
+        "play-judgment", playerId=player_id, playSeq=play_seq, judgment=result.judgment,
+        elapsedMs=elapsed_ms, published=publish, diagnostic=attempt.diagnostic,
+        metrics=list(attempt.metrics),
+        calibratedMetrics=[item["metric"] for item in attempt.comparisons],
+        modelVoiceMetric=result.voice_metric,
     )
     if publish:
-        await broadcast(room, {
-            "type": "play-reference",
-            "gameId": log.id,
-            "round": round_number,
-            "playSeq": play_seq,
-            "judgment": result.judgment,
-            "explanation": result.explanation,
-        }, peer)
+        status = (
+            "unavailable"
+            if attempt.diagnostic in ("not_configured", "api_timeout", "api_error")
+            else result.judgment
+        )
+        room.play_reference = {**reference, "status": status}
+        room.play_reference["voiceComparisons"] = attempt.comparisons
+        room.play_reference["modelVoiceMetric"] = result.voice_metric
+        if status in ("likely_bluff", "likely_truthful"):
+            room.play_reference["explanation"] = result.explanation
+        # Updating the reference must not restart the game timer.
+        await send_state(room)
 
 
 def start_claim(room: Room, peer: Peer, message: dict) -> None:
@@ -326,17 +385,17 @@ def start_claim(room: Room, peer: Peer, message: dict) -> None:
 
 async def caption_speech(
     room: Room, peer: Peer, pcm: bytes, log: GameLog | None, end: float,
-    claim: Claim | None,
+    claim: Claim | None, show_caption: bool,
 ) -> None:
     measured = {}
     try:
         async with transcribe_lock:
-            text = await asyncio.to_thread(transcribe, pcm)
+            transcription = await asyncio.to_thread(transcribe, pcm)
             # Only speech Whisper heard words in is measured, so coughs and
             # background noise never shift a player's baseline.
-            if text:
+            if transcription.text:
                 try:
-                    measured = await asyncio.to_thread(measure_voice, pcm, text)
+                    measured = await asyncio.to_thread(measure_voice, pcm, transcription.text)
                 except Exception:
                     # Captions still work without it.
                     logger.exception("Could not measure the voice")
@@ -344,17 +403,21 @@ async def caption_speech(
         logger.exception("Could not transcribe speech")
         await send(peer, {"type": "error", "message": "Captions are unavailable"})
         return
-    if claim:
-        claim.evidence.set_result((text, measured) if text else None)
+    text = transcription.text
     if text:
+        baseline = peer.voice_baseline.compare(measured)
+        if claim:
+            claim.evidence.set_result(ClaimEvidence(transcription, measured, baseline))
         if log and peer.save_speech:
             log.write_speech(peer.id, end - len(pcm) / BYTES_PER_SECOND, end, text)
+        if not show_caption:
+            return
         caption = {
             "type": "caption",
             "playerId": peer.id,
             "name": peer.name,
             "text": text,
-            "voice": peer.voice_baseline.compare(measured),
+            "voice": baseline,
         }
         await asyncio.gather(*(send(other, caption) for other in room.peers.values()))
 
@@ -377,7 +440,7 @@ def finish_speech(room: Room, peer: Peer) -> None:
     # transcribed. Speech still belongs to the game it was said in.
     log = room.log
     end = log.now() if log else 0.0
-    task = asyncio.create_task(caption_speech(room, peer, pcm, log, end, claim))
+    task = asyncio.create_task(caption_speech(room, peer, pcm, log, end, claim, peer.captions_enabled))
     caption_tasks.add(task)
     task.add_done_callback(caption_tasks.discard)
     if claim:
@@ -395,6 +458,8 @@ async def handle_messages(room: Room, peer: Peer) -> None:
             raise WebSocketDisconnect(frame.get("code", 1000))
         # Binary frames are the sender's speech; text frames are JSON messages.
         if frame.get("bytes") is not None:
+            if not peer.captions_enabled and not peer.pending_claim:
+                continue
             peer.speech += frame["bytes"]
             if len(peer.speech) >= MAX_SPEECH_BYTES:
                 finish_speech(room, peer)
@@ -409,6 +474,8 @@ async def handle_messages(room: Room, peer: Peer) -> None:
             start_claim(room, peer, message)
         elif message.get("type") == "speech-end":
             finish_speech(room, peer)
+        elif message.get("type") == "caption-preference" and isinstance(message.get("enabled"), bool):
+            peer.captions_enabled = message["enabled"]
         elif message.get("type") == "signal":
             target = room.peers.get(message.get("to"))
             if target is not None and target is not peer:
@@ -429,6 +496,7 @@ async def game_room(
     save_speech: bool = False,
     ai_recap: bool = False,
     gemini_analysis: bool = False,
+    captions_enabled: bool = True,
 ) -> None:
     # Accept before rejecting: a browser only sees the close reason of an
     # established connection.
@@ -444,6 +512,7 @@ async def game_room(
         save_speech,
         ai_recap,
         gemini_analysis=gemini_analysis,
+        captions_enabled=captions_enabled,
     )
 
     async with join_lock:

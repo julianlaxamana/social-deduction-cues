@@ -16,6 +16,7 @@ export class RoomConnection {
     saveSpeech: boolean,
     aiRecap: boolean,
     geminiAnalysis: boolean,
+    captionsEnabled: boolean,
     events: ConnectionEvents,
   ) {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -24,6 +25,7 @@ export class RoomConnection {
       save_speech: String(saveSpeech),
       ai_recap: String(aiRecap),
       gemini_analysis: String(geminiAnalysis),
+      captions_enabled: String(captionsEnabled),
     })
     this.socket = new WebSocket(
       `${scheme}://${location.host}/ws/${encodeURIComponent(room)}?${query}`,

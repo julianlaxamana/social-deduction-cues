@@ -70,16 +70,18 @@ export interface RoomState {
   gameId: string | null
   game: GameView | null
   secondsLeft: number | null
+  playReference: PlayReference | null
   recap: Recap | null
 }
 
 export interface PlayReference {
-  type: 'play-reference'
   gameId: string
   round: number
   playSeq: number
-  judgment: 'likely_bluff' | 'likely_truthful'
-  explanation: string
+  status: 'analyzing' | 'insufficient_evidence' | 'unavailable' | 'likely_bluff' | 'likely_truthful'
+  explanation?: string
+  voiceComparisons?: { metric: VoiceFeature; value: number; unit: string }[]
+  modelVoiceMetric?: VoiceFeature | null
 }
 
 /** One measurement of an utterance, compared with the speaker's usual voice. */
@@ -116,7 +118,6 @@ export type ServerMessage =
       voice: VoiceReadings
     }
   | RoomState
-  | PlayReference
 
 export type ClientMessage =
   | { type: 'signal'; to: string; data: SignalData }
@@ -124,6 +125,7 @@ export type ClientMessage =
   | { type: 'play'; cards: number[] }
   | { type: 'call' }
   | { type: 'speech-end' }
+  | { type: 'caption-preference'; enabled: boolean }
   | { type: 'speech-start'; gameId: string; round: number; previousPlaySeq: number | null }
 
 export const REVOLVER_CHAMBERS = 6
