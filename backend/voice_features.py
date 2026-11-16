@@ -122,7 +122,7 @@ def measure_voice(pcm: bytes, text: str = "") -> dict[str, float]:
     """
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64) / 32768
     words = re.findall(r"[a-z0-9']+", text.lower())
-    measured = {"fillers": sum(word in FILLERS for word in words)}
+    measured: dict[str, float] = {"fillers": sum(word in FILLERS for word in words)}
 
     hz = _pitch(pm.Sound(samples, sampling_frequency=SAMPLE_RATE))
     if hz is not None:
