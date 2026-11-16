@@ -47,6 +47,12 @@ export interface PlayerRecap extends PeerInfo {
   pulls: number
 }
 
+export interface AiSummary {
+  /** `off` means not everyone at the table opted in. */
+  status: 'pending' | 'ready' | 'failed' | 'off'
+  text?: string
+}
+
 export interface Recap {
   id: string
   rounds: number
@@ -54,6 +60,7 @@ export interface Recap {
   players: PlayerRecap[]
   highlights: { title: string; text: string }[]
   tells: string[]
+  ai: AiSummary | null
 }
 
 export interface RoomState {

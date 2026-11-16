@@ -83,6 +83,7 @@ async function join(
   name: string,
   room: string,
   saveSpeech: boolean,
+  aiRecap: boolean,
 ): Promise<void> {
   resumeAudio()
   hud.setJoining(true)
@@ -93,7 +94,7 @@ async function join(
     hud.showToast("No microphone: you can listen, but nobody will hear you.", 6000)
   }
   roomName = room
-  connection = new RoomConnection(room, name, saveSpeech, {
+  connection = new RoomConnection(room, name, saveSpeech, aiRecap, {
     onMessage: handleMessage,
     onClosed: (reason) => leave(reason),
   })

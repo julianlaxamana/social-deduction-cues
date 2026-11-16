@@ -62,6 +62,7 @@ cd backend && uv run pytest
   its own hand, so nobody can cheat by reading network traffic.
 - `backend/main.py` runs rooms and phase timers, and relays WebRTC signaling.
 - `backend/game_log.py` records each game, and `backend/recap.py` sums it up.
+  `backend/ai_summary.py` asks Claude for a written summary, if everyone agreed.
 - `frontend/src/scene/` is the Three.js bar, built entirely in code with no
   external assets.
 - `frontend/src/voice.ts` is peer-to-peer WebRTC audio, which never passes
@@ -123,6 +124,33 @@ It also points out differences between a player's lies and honest plays, in
 thinking time and, if they opted in to saving speech, in words per turn. These
 need at least 2 examples of each and a clear gap, but one game is very little
 data, so treat them as a talking point rather than evidence of a real tell.
+
+### Claude's take
+
+If every player ticks **Send the finished game to Claude** when joining, the
+server also asks Claude for a short written summary of the game: the turning
+points, and one thing each player could try next time. It appears at the bottom
+of the recap a few seconds after the stats. If anyone at the table didn't tick
+the box, nothing is sent.
+
+`backend/ai_summary.py` turns the game's events into plain English and pipes them
+into the Claude Code CLI (`claude -p`) with every tool turned off, so Claude can
+only read the game and reply with text. What it sees is everything in the game
+log: all hands, every play, and the saved words of players who opted in to
+saving speech. This goes to Anthropic, and each summary uses some of the host's
+Claude usage.
+
+To turn it on, the person running the server needs
+[Claude Code](https://claude.com/claude-code) installed and signed in. Run
+`claude` once in a terminal and sign in (or set `ANTHROPIC_API_KEY`), then start
+the server from that terminal. Without it, the recap says why there is no
+summary, and everything else still works. Optional settings:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
+| `CLAUDE_SUMMARY_MODEL` | `sonnet` | Model to use |
+| `CLAUDE_SUMMARY_TIMEOUT` | `120` | Seconds to wait before giving up |
 
 ## Playing across machines
 

@@ -271,6 +271,33 @@ button.active {
   color: var(--muted);
 }
 
+#recap-ai {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+#recap-ai[hidden] {
+  display: none;
+}
+
+#recap-ai h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: normal;
+  color: var(--gold);
+}
+
+#recap-ai p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+#recap-ai:not([data-status='ready']) p {
+  color: var(--muted);
+}
+
 #recap-close {
   width: 100%;
   margin-top: 16px;
