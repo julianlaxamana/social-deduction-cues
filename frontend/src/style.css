@@ -321,11 +321,32 @@ button.active {
   text-shadow: 0 1px 4px #000;
 }
 
-#prompt {
+.turn-panel {
   flex: 1;
+  min-width: 0;
   text-align: center;
+}
+
+#prompt {
   font-size: 18px;
   text-shadow: 0 1px 4px #000, 0 0 12px #000;
+}
+
+#play-reference {
+  width: fit-content;
+  max-width: 100%;
+  margin: 8px auto 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(10, 6, 3, 0.86);
+  color: var(--gold);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+#play-reference p {
+  margin: 2px 0 0;
+  color: #fff3dc;
 }
 
 #prompt.urgent {

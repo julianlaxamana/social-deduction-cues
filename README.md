@@ -91,6 +91,26 @@ The first 5 utterances only build that baseline, so they show as calibrating.
 Only speech that Whisper found words in counts, and turning captions off stops
 pitch too. A change in pitch is a hint, not proof of a lie.
 
+## Gemini play reference
+
+Set `GEMINI_API_KEY` in the backend process environment before running
+`uv run --locked main.py`. Set `GEMINI_MODEL` to override the default
+`gemini-3.5-flash-lite`. Run `uv run --locked probe_gemini.py` from
+`backend/` to list models that support `generateContent` and try the configured
+model with a synthetic claim.
+
+The join form lets each player opt in to sending one relevant caption transcript
+and available speech measurements to Google per play. Captions must be on.
+Say the claim during your turn and play the cards shortly afterwards. Other
+players see the AI reference and its reason for up to five seconds, provided
+the play is still face down and can be called. Players make their own calls.
+
+The game log records the category, play sequence, elapsed milliseconds from
+the accepted play, and whether the server published the reference. The
+explanation stays in memory because it may quote the transcript.
+The model probe uses only synthetic text. Review the Gemini service's data
+terms before sending real player speech.
+
 ## Game logs
 
 Each game is written to `backend/logs/` as one JSON Lines file, ignored by git.

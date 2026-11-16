@@ -133,6 +133,7 @@ class Game:
         self.on_event(
             "play",
             round=self.round,
+            playSeq=self.last_play.seq,
             playerId=player_id,
             ranks=[card.rank for card in self.last_play.cards],
             lied=self._is_lie(self.last_play),

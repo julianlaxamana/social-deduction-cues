@@ -67,9 +67,19 @@ export interface RoomState {
   type: 'state'
   version: number
   players: PeerInfo[]
+  gameId: string | null
   game: GameView | null
   secondsLeft: number | null
   recap: Recap | null
+}
+
+export interface PlayReference {
+  type: 'play-reference'
+  gameId: string
+  round: number
+  playSeq: number
+  judgment: 'likely_bluff' | 'likely_truthful'
+  explanation: string
 }
 
 /** One measurement of an utterance, compared with the speaker's usual voice. */
@@ -106,6 +116,7 @@ export type ServerMessage =
       voice: VoiceReadings
     }
   | RoomState
+  | PlayReference
 
 export type ClientMessage =
   | { type: 'signal'; to: string; data: SignalData }
@@ -113,6 +124,7 @@ export type ClientMessage =
   | { type: 'play'; cards: number[] }
   | { type: 'call' }
   | { type: 'speech-end' }
+  | { type: 'speech-start'; gameId: string; round: number; previousPlaySeq: number | null }
 
 export const REVOLVER_CHAMBERS = 6
 export const RANK_NAMES: Record<Rank, string> = {
