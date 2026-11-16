@@ -22,6 +22,7 @@ from captions import BYTES_PER_SECOND, load_model, transcribe
 from game import Game, IllegalMove, Phase
 from game_log import GameLog
 from recap import build_recap
+from voice_features import VoiceBaseline, measure_voice
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ class Peer:
     # Whether this player agreed to have the game sent to Claude for a summary.
     ai_recap: bool = False
     speech: bytearray = field(default_factory=bytearray)
+    # Kept for the whole connection, so it carries over between games.
+    voice_baseline: VoiceBaseline = field(default_factory=VoiceBaseline)
 
     def info(self) -> dict[str, str]:
         return {"id": self.id, "name": self.name}
@@ -223,9 +226,18 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
 async def caption_speech(
     room: Room, peer: Peer, pcm: bytes, log: GameLog | None, end: float
 ) -> None:
+    measured = {}
     try:
         async with transcribe_lock:
             text = await asyncio.to_thread(transcribe, pcm)
+            # Only speech Whisper heard words in is measured, so coughs and
+            # background noise never shift a player's baseline.
+            if text:
+                try:
+                    measured = await asyncio.to_thread(measure_voice, pcm, text)
+                except Exception:
+                    # Captions still work without it.
+                    logger.exception("Could not measure the voice")
     except Exception:
         logger.exception("Could not transcribe speech")
         await send(peer, {"type": "error", "message": "Captions are unavailable"})
@@ -233,7 +245,13 @@ async def caption_speech(
     if text:
         if log and peer.save_speech:
             log.write_speech(peer.id, end - len(pcm) / BYTES_PER_SECOND, end, text)
-        caption = {"type": "caption", "playerId": peer.id, "name": peer.name, "text": text}
+        caption = {
+            "type": "caption",
+            "playerId": peer.id,
+            "name": peer.name,
+            "text": text,
+            "voice": peer.voice_baseline.compare(measured),
+        }
         await asyncio.gather(*(send(other, caption) for other in room.peers.values()))
 
 

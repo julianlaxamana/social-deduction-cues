@@ -67,7 +67,7 @@ function handleMessage(message: ServerMessage): void {
       hud.showToast(message.message)
       break
     case 'caption':
-      if (captionsEnabled) hud.addCaption(message.name, message.text)
+      if (captionsEnabled) hud.addCaption(message.name, message.text, message.voice)
       break
     case 'state':
       // A newer state may already have arrived; never step backwards.

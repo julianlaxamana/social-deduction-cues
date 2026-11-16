@@ -72,6 +72,22 @@ export interface RoomState {
   recap: Recap | null
 }
 
+/** One measurement of an utterance, compared with the speaker's usual voice. */
+export interface VoiceReading {
+  value: number
+  /** Null while the server is still learning the speaker's voice. */
+  change: number | null
+  trend: 'calibrating' | 'higher' | 'lower' | 'steady'
+}
+
+export type VoiceFeature = 'pitch' | 'speed' | 'pauses'
+
+/** A reading is null when that feature could not be measured. */
+export type VoiceReadings = Record<VoiceFeature, VoiceReading | null> & {
+  /** How many times the speaker said "um" or similar. */
+  fillers: number
+}
+
 export type SignalData =
   | { description: RTCSessionDescriptionInit }
   | { candidate: RTCIceCandidateInit }
@@ -82,7 +98,13 @@ export type ServerMessage =
   | { type: 'peer-left'; id: string }
   | { type: 'signal'; from: string; data: SignalData }
   | { type: 'error'; message: string }
-  | { type: 'caption'; playerId: string; name: string; text: string }
+  | {
+      type: 'caption'
+      playerId: string
+      name: string
+      text: string
+      voice: VoiceReadings
+    }
   | RoomState
 
 export type ClientMessage =

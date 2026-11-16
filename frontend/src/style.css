@@ -459,6 +459,24 @@ button.active {
   color: var(--gold);
 }
 
+#captions .cue {
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+#captions .cue-higher {
+  color: #ff9a6b;
+}
+
+#captions .cue-lower {
+  color: #8ec5ff;
+}
+
+#captions .cue-filler {
+  color: var(--gold);
+}
+
 #toast {
   position: absolute;
   bottom: 96px;

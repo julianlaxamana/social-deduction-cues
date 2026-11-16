@@ -1,5 +1,6 @@
-import type { AiSummary, GameView, PeerInfo, PlayerRecap, Recap } from './protocol.ts'
+import type { AiSummary, GameView, PeerInfo, PlayerRecap, Recap, VoiceReadings} from './protocol.ts'
 import { RANK_NAMES, REVOLVER_CHAMBERS } from './protocol.ts'
+import { voiceCues } from './voiceCues.ts'
 
 export interface HudActions {
   onJoin: (name: string, room: string, saveSpeech: boolean, aiRecap: boolean) => void
@@ -216,11 +217,13 @@ export class Hud {
     if (!enabled) this.clearCaptions()
   }
 
-  addCaption(name: string, text: string): void {
+  addCaption(name: string, text: string, voice: VoiceReadings): void {
     const line = document.createElement('p')
     const speaker = document.createElement('strong')
     speaker.textContent = `${name}: `
     line.append(speaker, text)
+    const cues = voiceCues(name, voice)
+    if (cues) line.append(' ', cues)
     this.captions.append(line)
     while (this.captions.childElementCount > MAX_CAPTIONS) {
       this.captions.firstElementChild?.remove()
