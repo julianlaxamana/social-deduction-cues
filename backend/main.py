@@ -20,6 +20,7 @@ from captions import BYTES_PER_SECOND, load_model, transcribe
 from game import Game, IllegalMove, Phase
 from game_log import GameLog
 from recap import build_recap
+from voice_features import PitchBaseline, measure_pitch
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,8 @@ class Peer:
     # Whether this player agreed to have their words saved in the game log.
     save_speech: bool = False
     speech: bytearray = field(default_factory=bytearray)
+    # Kept for the whole connection, so it carries over between games.
+    pitch_baseline: PitchBaseline = field(default_factory=PitchBaseline)
 
     def info(self) -> dict[str, str]:
         return {"id": self.id, "name": self.name}
@@ -177,6 +180,13 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
 async def caption_speech(
     room: Room, peer: Peer, pcm: bytes, log: GameLog | None, end: float
 ) -> None:
+    # Measured outside the lock: it is quick, and must not wait behind Whisper.
+    try:
+        hz = await asyncio.to_thread(measure_pitch, pcm)
+    except Exception:
+        # Captions still work without pitch.
+        logger.exception("Could not measure pitch")
+        hz = None
     try:
         async with transcribe_lock:
             text = await asyncio.to_thread(transcribe, pcm)
@@ -185,9 +195,18 @@ async def caption_speech(
         await send(peer, {"type": "error", "message": "Captions are unavailable"})
         return
     if text:
+        # Only speech Whisper heard words in counts, so coughs and background
+        # noise never shift a player's baseline.
+        pitch = peer.pitch_baseline.compare(hz) if hz is not None else None
         if log and peer.save_speech:
             log.write_speech(peer.id, end - len(pcm) / BYTES_PER_SECOND, end, text)
-        caption = {"type": "caption", "playerId": peer.id, "name": peer.name, "text": text}
+        caption = {
+            "type": "caption",
+            "playerId": peer.id,
+            "name": peer.name,
+            "text": text,
+            "pitch": pitch,
+        }
         await asyncio.gather(*(send(other, caption) for other in room.peers.values()))
 
 

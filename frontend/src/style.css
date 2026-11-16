@@ -432,6 +432,20 @@ button.active {
   color: var(--gold);
 }
 
+#captions .pitch {
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+#captions .pitch-higher {
+  color: #ff9a6b;
+}
+
+#captions .pitch-lower {
+  color: #8ec5ff;
+}
+
 #toast {
   position: absolute;
   bottom: 96px;

@@ -65,6 +65,14 @@ export interface RoomState {
   recap: Recap | null
 }
 
+/** How an utterance's pitch compares with the speaker's usual voice. */
+export interface PitchReading {
+  hz: number
+  /** Null while the server is still learning the speaker's voice. */
+  semitones: number | null
+  trend: 'calibrating' | 'higher' | 'lower' | 'steady'
+}
+
 export type SignalData =
   | { description: RTCSessionDescriptionInit }
   | { candidate: RTCIceCandidateInit }
@@ -75,7 +83,13 @@ export type ServerMessage =
   | { type: 'peer-left'; id: string }
   | { type: 'signal'; from: string; data: SignalData }
   | { type: 'error'; message: string }
-  | { type: 'caption'; playerId: string; name: string; text: string }
+  | {
+      type: 'caption'
+      playerId: string
+      name: string
+      text: string
+      pitch: PitchReading | null
+    }
   | RoomState
 
 export type ClientMessage =

@@ -43,6 +43,40 @@ def test_speech_is_captioned_for_everyone_at_the_table(spoken):
     assert spoken == [audio]
 
 
+def test_captions_include_the_speakers_pitch(spoken, monkeypatch):
+    monkeypatch.setattr(main, "measure_pitch", lambda _pcm: 180.0)
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/ws/pitch-table?name=Ann") as ann:
+            with client.websocket_connect("/ws/pitch-table?name=Bo") as bo:
+                ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
+                ann.send_json({"type": "speech-end"})
+                for socket in (ann, bo):
+                    pitch = receive_until(socket, "caption")["pitch"]
+                    assert pitch == {"hz": 180, "semitones": None, "trend": "calibrating"}
+
+
+def test_unvoiced_speech_is_captioned_without_pitch(spoken):
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/ws/flat-table?name=Ann") as ann:
+            ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
+            ann.send_json({"type": "speech-end"})
+            assert receive_until(ann, "caption")["pitch"] is None
+
+
+def test_pitch_failure_does_not_stop_captions(spoken, monkeypatch):
+    def broken(_pcm):
+        raise RuntimeError("praat failed")
+
+    monkeypatch.setattr(main, "measure_pitch", broken)
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/ws/pitchless-table?name=Ann") as ann:
+            ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
+            ann.send_json({"type": "speech-end"})
+            caption = receive_until(ann, "caption")
+            assert caption["text"] == "three kings"
+            assert caption["pitch"] is None
+
+
 def test_too_little_audio_is_ignored(spoken):
     with TestClient(main.app) as client:
         with client.websocket_connect("/ws/short-table?name=Ann") as ann:

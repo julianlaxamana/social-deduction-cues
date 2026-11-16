@@ -1,4 +1,10 @@
-import type { GameView, PeerInfo, PlayerRecap, Recap } from './protocol.ts'
+import type {
+  GameView,
+  PeerInfo,
+  PitchReading,
+  PlayerRecap,
+  Recap,
+} from './protocol.ts'
 import { RANK_NAMES, REVOLVER_CHAMBERS } from './protocol.ts'
 
 export interface HudActions {
@@ -101,6 +107,25 @@ const OUTCOME_LABELS: Record<PlayerRecap['outcome'], string> = {
 }
 const CAPTION_SECONDS = 8
 const MAX_CAPTIONS = 4
+
+const PITCH_LABELS: Record<PitchReading['trend'], string> = {
+  higher: '▲ pitch',
+  lower: '▼ pitch',
+  steady: '• pitch',
+  calibrating: '… pitch',
+}
+
+/** A tag saying how a caption's pitch compares with the speaker's usual voice. */
+function pitchBadge(name: string, pitch: PitchReading): HTMLSpanElement {
+  const badge = document.createElement('span')
+  badge.className = `pitch pitch-${pitch.trend}`
+  badge.textContent = PITCH_LABELS[pitch.trend]
+  badge.title =
+    pitch.semitones === null
+      ? `Still learning ${name}'s voice (${pitch.hz} Hz)`
+      : `${pitch.semitones > 0 ? '+' : ''}${pitch.semitones} semitones from ${name}'s usual pitch`
+  return badge
+}
 
 function element<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T
@@ -206,11 +231,12 @@ export class Hud {
     if (!enabled) this.clearCaptions()
   }
 
-  addCaption(name: string, text: string): void {
+  addCaption(name: string, text: string, pitch: PitchReading | null): void {
     const line = document.createElement('p')
     const speaker = document.createElement('strong')
     speaker.textContent = `${name}: `
     line.append(speaker, text)
+    if (pitch) line.append(' ', pitchBadge(name, pitch))
     this.captions.append(line)
     while (this.captions.childElementCount > MAX_CAPTIONS) {
       this.captions.firstElementChild?.remove()

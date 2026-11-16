@@ -80,6 +80,16 @@ muted. The server transcribes it and sends the text to the table. It never keeps
 the audio, and only keeps the text for players who opt in (see below). Pressing C or the Captions button hides captions and stops
 sending your speech.
 
+## Pitch
+
+Each caption also shows whether the speaker's pitch was higher, lower or steady
+compared with their usual voice. `backend/voice_features.py` measures the median
+pitch of each utterance with [Praat](https://parselmouth.readthedocs.io/) and
+compares it, in semitones, with everything that player has said since joining.
+The first 5 utterances only build that baseline, so they show as calibrating.
+Only speech that Whisper found words in counts, and turning captions off stops
+pitch too. A change in pitch is a hint, not proof of a lie.
+
 ## Game logs
 
 Each game is written to `backend/logs/` as one JSON Lines file, ignored by git.
