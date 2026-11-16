@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from captions import BYTES_PER_SECOND
+from captions import BYTES_PER_SECOND, Transcription
 
 
 @pytest.fixture
@@ -12,7 +12,7 @@ def spoken(monkeypatch):
 
     def fake_transcribe(pcm):
         received.append(pcm)
-        return "three kings"
+        return Transcription("three kings", True)
 
     monkeypatch.setattr(main, "transcribe", fake_transcribe)
     return received
@@ -83,7 +83,7 @@ def test_what_cannot_be_measured_is_left_out(spoken):
 
 def test_sounds_without_words_are_not_measured(monkeypatch):
     measured = []
-    monkeypatch.setattr(main, "transcribe", lambda _pcm: "")
+    monkeypatch.setattr(main, "transcribe", lambda _pcm: Transcription("", False))
     monkeypatch.setattr(main, "measure_voice", lambda *args: measured.append(args) or {})
     with TestClient(main.app) as client:
         with client.websocket_connect("/ws/cough-table?name=Ann") as ann:

@@ -99,14 +99,22 @@ Set `GEMINI_API_KEY` in the backend process environment before running
 `backend/` to list models that support `generateContent` and try the configured
 model with a synthetic claim.
 
-The join form lets each player opt in to sending one relevant caption transcript
-and available speech measurements to Google per play. Captions must be on.
-Say the claim during your turn and play the cards shortly afterwards. Other
-players see the AI reference and its reason for up to five seconds, provided
-the play is still face down and can be called. Players make their own calls.
+The join form lets each player opt in to real-time AI hints independently of
+captions, saving transcripts, and the Claude recap. For opted-in speakers the
+server sends a relevant transcript and available voice measurements to Google.
+The service does not receive raw audio, and the game server does not save it.
+Say a claim during your turn and play shortly after. Short claims work too.
+An automated play with no reliable claim uses only public game context.
+Only opted-in players see the status box at the lower left. It shows progress,
+the result, or why there is no guess, and resets when the play is no longer callable.
+It also shows any calibrated pitch, pace, and pause changes from the speaker's
+own baseline and indicates if Gemini cited one. Each metric needs five previous
+valid utterances from that speaker. A voice change alone does not establish a bluff.
+Players make their own calls.
 
 The game log records the category, play sequence, elapsed milliseconds from
-the accepted play, and whether the server published the reference. The
+the accepted play, which metrics were included, a diagnostic code, and whether
+the server published the status. The
 explanation stays in memory because it may quote the transcript.
 The model probe uses only synthetic text. Review the Gemini service's data
 terms before sending real player speech.

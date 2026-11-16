@@ -28,7 +28,7 @@ async def main() -> int:
                 if model not in supported:
                     print(f"{model} is unavailable. Set GEMINI_MODEL to an available Flash model.")
                     return 1
-                result = await judge_play(
+                attempt = await judge_play(
                     table_rank="Q", card_count=2,
                     transcript="Two queens.", speech_features={}, client=client,
                 )
@@ -36,10 +36,10 @@ async def main() -> int:
         print(f"Gemini model discovery failed ({type(error).__name__}).")
         return 1
 
-    if result.explanation == "Gemini could not provide a judgment.":
+    if attempt.diagnostic in ("api_timeout", "api_error", "not_configured"):
         print(f"{model} failed the generation probe. See the diagnostic above.")
         return 1
-    print(f"{model} returned valid structured output: {result.judgment}")
+    print(f"{model} returned valid structured output: {attempt.result.judgment}")
     return 0
 
 

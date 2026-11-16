@@ -19,7 +19,6 @@ let muted = false
 let hasMicrophone = false
 let captionsEnabled = true
 let geminiAnalysis = false
-let activeReference: PlayReference | null = null
 
 const voice = new VoiceChat({
   onConnectionsChanged: render,
@@ -66,6 +65,9 @@ function render(): void {
   } else {
     hud.showLobby(roomName, selfId, latest.players, (id) => voice.connectionState(id))
   }
+  const reference = latest.playReference
+  hud.showPlayReference(geminiAnalysis && !!latest.game && latest.game.phase !== 'over',
+    reference && isCurrentReference(reference) ? reference : null)
   hud.showRecap(latest.recap, selfId)
 }
 
@@ -89,20 +91,11 @@ function handleMessage(message: ServerMessage): void {
     case 'caption':
       if (captionsEnabled) hud.addCaption(message.name, message.text, message.voice)
       break
-    case 'play-reference':
-      if (isCurrentReference(message)) {
-        activeReference = message
-        hud.showPlayReference(message)
-      }
-      break
     case 'state':
       // A newer state may already have arrived; never step backwards.
       if (latest && message.version < latest.version) return
       latest = message
-      if (activeReference && !isCurrentReference(activeReference)) {
-        activeReference = null
-        hud.showPlayReference(null)
-      }
+      updateSpeechCapture()
       scene.sync(selfId, message.players, message.game)
       render()
       break
@@ -126,12 +119,13 @@ async function join(
   }
   roomName = room
   geminiAnalysis = useGeminiAnalysis
-  connection = new RoomConnection(room, name, saveSpeech, aiRecap, geminiAnalysis, {
+  connection = new RoomConnection(room, name, saveSpeech, aiRecap, geminiAnalysis, captionsEnabled, {
     onMessage: handleMessage,
     onClosed: (reason) => leave(reason),
   })
   voice.setSender((message) => connection?.send(message))
   hud.showCaptionsEnabled(captionsEnabled)
+  updateSpeechCapture()
   const stream = voice.microphoneStream
   // Captions are a bonus: the game and voice chat carry on without them.
   if (stream) speech.start(stream).catch(console.error)
@@ -141,8 +135,7 @@ function leave(reason = ''): void {
   connection?.close()
   connection = null
   latest = null
-  activeReference = null
-  hud.showPlayReference(null)
+  hud.showPlayReference(false, null)
   selfId = ''
   speech.stop()
   voice.stop()
@@ -160,6 +153,7 @@ function toggleMute(): void {
   if (!hasMicrophone) return
   muted = !muted
   voice.setMuted(muted)
+  updateSpeechCapture()
   hud.showMuted(muted, hasMicrophone)
 }
 
@@ -168,9 +162,16 @@ setInterval(() => {
 }, 100)
 
 function toggleCaptions(): void {
+  speech.finishForPlay()
   captionsEnabled = !captionsEnabled
-  speech.enabled = captionsEnabled
+  connection?.send({ type: 'caption-preference', enabled: captionsEnabled })
+  updateSpeechCapture()
   hud.showCaptionsEnabled(captionsEnabled)
+}
+
+function updateSpeechCapture(): void {
+  const myTurn = latest?.game?.currentPlayerId === selfId
+  speech.enabled = !muted && (captionsEnabled || (geminiAnalysis && myTurn))
 }
 
 addEventListener('keydown', (event) => {

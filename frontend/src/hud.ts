@@ -35,8 +35,10 @@ export const HUD_HTML = `
   </label>
   <label class="checkbox">
     <input id="gemini-analysis" type="checkbox" />
-    While captions are on, send a short transcript and voice measurements from my
-    turn to Google Gemini. Other players may see a guess and its reason.
+    <span>Allow my speech to be captured and analyzed for real-time AI hints.
+    This also enables the AI box. Google Gemini receives short transcripts and
+    voice measurements from my turns. The server does not save raw audio.
+    Saving transcripts is controlled separately above.</span>
   </label>
   <label class="checkbox">
     <input id="ai-recap" type="checkbox" />
@@ -48,7 +50,8 @@ export const HUD_HTML = `
     Play 1–3 cards face down, claiming they match the table card, or call the
     last player a liar. Whoever is wrong pulls the trigger. Jokers are always
     honest. Your microphone is live for the whole table, and what you say is
-    sent to the game server to make captions, unless you turn captions off.
+    sent to the game server for captions when enabled or for optional AI hints
+    during your turns.
     Plays and hands are logged on the server after each game.
   </p>
   <p id="join-status" role="status"></p>
@@ -92,10 +95,6 @@ export const HUD_HTML = `
   <div id="table-chip"></div>
   <div class="turn-panel">
     <div id="prompt" role="status"></div>
-    <div id="play-reference" role="status" hidden>
-      <strong id="reference-label"></strong>
-      <p id="reference-reason"></p>
-    </div>
   </div>
   <div class="top-controls">
     <button type="button" id="mute" aria-pressed="false" title="Toggle microphone (M)">Mute</button>
@@ -106,7 +105,15 @@ export const HUD_HTML = `
 
 <div id="banner" role="alert"></div>
 <div id="flash"></div>
-<div id="captions" aria-live="polite"></div>
+<div class="speech-overlay">
+  <div id="captions" aria-live="polite"></div>
+  <aside id="play-reference" role="status" aria-atomic="true" hidden>
+    <strong>AI reference</strong>
+    <div id="reference-label"></div>
+    <p id="reference-reason" hidden></p>
+    <p id="reference-voice" hidden></p>
+  </aside>
+</div>
 
 <div id="actions" hidden>
   <p id="hand-hint">Click cards or press 1–5 · Enter plays · L calls</p>
@@ -126,7 +133,14 @@ const OUTCOME_LABELS: Record<PlayerRecap['outcome'], string> = {
 }
 const CAPTION_SECONDS = 8
 const MAX_CAPTIONS = 4
-const REFERENCE_DURATION_MS = 5000
+const REFERENCE_LABELS: Record<PlayReference['status'], string> = {
+  analyzing: 'Analyzing…',
+  insufficient_evidence: 'Insufficient evidence',
+  unavailable: 'Unavailable',
+  likely_bluff: 'Likely bluff',
+  likely_truthful: 'Likely truthful',
+}
+const VOICE_LABELS = { pitch: 'Pitch', speed: 'Pace', pauses: 'Pauses' }
 
 function element<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T
@@ -163,7 +177,6 @@ export class Hud {
   private deadline = 0
   private promptText = ''
   private toastTimer = 0
-  private referenceTimer = 0
   private previous: GameView | null = null
   private selectedCount = 0
   private selfId = ''
@@ -193,15 +206,33 @@ export class Hud {
     return !this.playButton.disabled && !this.actions.hidden
   }
 
-  showPlayReference(reference: PlayReference | null): void {
-    clearTimeout(this.referenceTimer)
+  showPlayReference(visible: boolean, reference: PlayReference | null): void {
     const hint = element<HTMLDivElement>('play-reference')
-    hint.hidden = reference === null
-    if (!reference) return
-    const guess = reference.judgment === 'likely_bluff' ? 'likely bluff' : 'likely truthful'
-    element('reference-label').textContent = `AI reference: ${guess}`
-    element('reference-reason').textContent = reference.explanation
-    this.referenceTimer = window.setTimeout(() => this.showPlayReference(null), REFERENCE_DURATION_MS)
+    hint.hidden = !visible
+    const label = reference ? REFERENCE_LABELS[reference.status] : 'Waiting for a play'
+    const reason = reference?.explanation ?? ''
+    const labelNode = element<HTMLElement>('reference-label')
+    const reasonNode = element<HTMLParagraphElement>('reference-reason')
+    if (labelNode.textContent !== label) labelNode.textContent = label
+    if (reasonNode.textContent !== reason) reasonNode.textContent = reason
+    reasonNode.hidden = !reason
+    const voiceNode = element<HTMLParagraphElement>('reference-voice')
+    const comparisons = reference?.voiceComparisons ?? []
+    let voiceText = ''
+    if (reference && reference.status !== 'analyzing') {
+      if (comparisons.length) {
+        const values = comparisons.map(({ metric, value, unit }) =>
+          `${VOICE_LABELS[metric]} ${value > 0 ? '+' : ''}${value} ${unit}`)
+        const cited = reference.modelVoiceMetric
+        voiceText = `Compared with usual: ${values.join(' · ')}.`
+        if (cited) voiceText += ` AI cited ${VOICE_LABELS[cited].toLowerCase()} as context.`
+        else if (reference.status !== 'unavailable') voiceText += ' AI cited no voice change.'
+      } else {
+        voiceText = 'No calibrated voice comparison for this play.'
+      }
+    }
+    if (voiceNode.textContent !== voiceText) voiceNode.textContent = voiceText
+    voiceNode.hidden = !voiceText
   }
 
   get canCall(): boolean {
