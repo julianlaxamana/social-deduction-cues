@@ -2,7 +2,7 @@
 
 It also relays the WebRTC offers, answers and ICE candidates players need to
 connect to each other directly. Live voice never passes through this server;
-the only audio it receives is what players send to be captioned.
+the only audio it receives is what players send to be captioned and measured.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from captions import BYTES_PER_SECOND, load_model, transcribe
 from game import Game, IllegalMove, Phase
 from game_log import GameLog
 from recap import build_recap
-from voice_features import PitchBaseline, measure_pitch
+from voice_features import VoiceBaseline, measure_delivery, measure_voice
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class Peer:
     save_speech: bool = False
     speech: bytearray = field(default_factory=bytearray)
     # Kept for the whole connection, so it carries over between games.
-    pitch_baseline: PitchBaseline = field(default_factory=PitchBaseline)
+    voice_baseline: VoiceBaseline = field(default_factory=VoiceBaseline)
 
     def info(self) -> dict[str, str]:
         return {"id": self.id, "name": self.name}
@@ -182,22 +182,21 @@ async def caption_speech(
 ) -> None:
     # Measured outside the lock: it is quick, and must not wait behind Whisper.
     try:
-        hz = await asyncio.to_thread(measure_pitch, pcm)
+        measured = await asyncio.to_thread(measure_voice, pcm)
     except Exception:
-        # Captions still work without pitch.
-        logger.exception("Could not measure pitch")
-        hz = None
+        # Captions still work without it.
+        logger.exception("Could not measure the voice")
+        measured = {}
     try:
         async with transcribe_lock:
-            text = await asyncio.to_thread(transcribe, pcm)
+            transcript = await asyncio.to_thread(transcribe, pcm)
     except Exception:
         logger.exception("Could not transcribe speech")
         await send(peer, {"type": "error", "message": "Captions are unavailable"})
         return
+    text = transcript.text
     if text:
-        # Only speech Whisper heard words in counts, so coughs and background
-        # noise never shift a player's baseline.
-        pitch = peer.pitch_baseline.compare(hz) if hz is not None else None
+        measured |= measure_delivery(transcript.words)
         if log and peer.save_speech:
             log.write_speech(peer.id, end - len(pcm) / BYTES_PER_SECOND, end, text)
         caption = {
@@ -205,7 +204,9 @@ async def caption_speech(
             "playerId": peer.id,
             "name": peer.name,
             "text": text,
-            "pitch": pitch,
+            # Only speech Whisper heard words in counts, so coughs and background
+            # noise never shift a player's baseline.
+            "voice": peer.voice_baseline.compare(measured),
         }
         await asyncio.gather(*(send(other, caption) for other in room.peers.values()))
 

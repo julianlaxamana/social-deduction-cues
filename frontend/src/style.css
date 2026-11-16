@@ -432,17 +432,17 @@ button.active {
   color: var(--gold);
 }
 
-#captions .pitch {
+#captions .cue {
   font-size: 12px;
   white-space: nowrap;
   color: var(--muted);
 }
 
-#captions .pitch-higher {
+#captions .cue-higher {
   color: #ff9a6b;
 }
 
-#captions .pitch-lower {
+#captions .cue-lower {
   color: #8ec5ff;
 }
 

@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 import game_log
 import main
-from captions import BYTES_PER_SECOND
+from captions import BYTES_PER_SECOND, Transcript
 from game import Card, Game, Phase
 
 
@@ -139,7 +139,7 @@ def test_unwritable_log_does_not_break_the_game(tmp_path, monkeypatch):
 
 def play_with_speech(monkeypatch, ann_query):
     """Starts a game, then has Ann say something and waits for the caption."""
-    monkeypatch.setattr(main, "transcribe", lambda pcm: "three kings")
+    monkeypatch.setattr(main, "transcribe", lambda pcm: Transcript("three kings"))
     with TestClient(main.app) as client:
         with client.websocket_connect(f"/ws/log-table?name=Ann{ann_query}") as ann:
             ann_id = receive_until(ann, "welcome")["id"]
@@ -173,7 +173,7 @@ def test_speech_is_captioned_but_not_saved_without_opting_in(log_dir, monkeypatc
 
 
 def test_lobby_speech_is_not_logged(log_dir, monkeypatch):
-    monkeypatch.setattr(main, "transcribe", lambda pcm: "hello")
+    monkeypatch.setattr(main, "transcribe", lambda pcm: Transcript("hello"))
     with TestClient(main.app) as client:
         with client.websocket_connect("/ws/quiet-table?name=Ann&save_speech=true") as ann:
             ann.send_bytes(b"\x01\x00" * BYTES_PER_SECOND)
