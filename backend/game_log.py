@@ -12,7 +12,11 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from gemini_judgment import Judgment
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +27,13 @@ class GameLog:
     def __init__(self, room_id: str) -> None:
         started = datetime.now(timezone.utc)
         stamp = started.strftime("%Y%m%dT%H%M%SZ")
-        self.path = LOG_DIR / f"{stamp}-{room_id}-{uuid4().hex[:8]}.jsonl"
+        self.id = uuid4().hex
+        self.path = LOG_DIR / f"{stamp}-{room_id}-{self.id[:8]}.jsonl"
         self.started = time.monotonic()
         # Also kept in memory, so a recap works even if the file can't be written.
         self.events: list[dict] = []
+        # Explanations may quote speech. Keep them out of the JSONL log.
+        self.judgments: dict[int, Judgment] = {}
         self.write("log-start", room=room_id, startedAt=started.isoformat())
 
     def now(self) -> float:

@@ -31,6 +31,8 @@ registerProcessor('speech-capture', class extends AudioWorkletProcessor {
 `
 
 export interface SpeechEvents {
+  /** A new utterance was detected in the microphone stream. */
+  onSpeechStart: () => void
   /** A piece of the current utterance, as 16 kHz 16-bit mono PCM. */
   onAudio: (pcm: ArrayBuffer) => void
   /** The player stopped talking. */
@@ -90,6 +92,11 @@ export class SpeechCapture {
     this.speaking = false
   }
 
+  finishForPlay(): void {
+    if (this.speaking) this.endUtterance()
+    this.preRoll = []
+  }
+
   private handleBatch(batch: Float32Array): void {
     if (!this.enabled) {
       if (this.speaking) this.endUtterance()
@@ -110,6 +117,7 @@ export class SpeechCapture {
       while (this.preRoll.length * seconds > PRE_ROLL_SECONDS) this.preRoll.shift()
       if (loud) {
         this.speaking = true
+        this.events.onSpeechStart()
         this.silenceSeconds = 0
         this.utteranceSeconds = this.preRoll.length * seconds
         this.pending = this.preRoll

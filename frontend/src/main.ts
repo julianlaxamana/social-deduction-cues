@@ -3,7 +3,7 @@ import { resumeAudio } from './audio.ts'
 import { SpeechCapture } from './captions.ts'
 import { RoomConnection } from './connection.ts'
 import { HUD_HTML, Hud } from './hud.ts'
-import type { RoomState, ServerMessage } from './protocol.ts'
+import type { PlayReference, RoomState, ServerMessage } from './protocol.ts'
 import { BarScene } from './scene/scene.ts'
 import { VoiceChat } from './voice.ts'
 
@@ -18,6 +18,8 @@ let latest: RoomState | null = null
 let muted = false
 let hasMicrophone = false
 let captionsEnabled = true
+let geminiAnalysis = false
+let activeReference: PlayReference | null = null
 
 const voice = new VoiceChat({
   onConnectionsChanged: render,
@@ -28,6 +30,16 @@ const voice = new VoiceChat({
 })
 
 const speech = new SpeechCapture({
+  onSpeechStart() {
+    const game = latest?.game
+    if (!geminiAnalysis || !latest?.gameId || game?.currentPlayerId !== selfId) return
+    connection?.send({
+      type: 'speech-start',
+      gameId: latest.gameId,
+      round: game.round,
+      previousPlaySeq: game.lastPlay?.seq ?? null,
+    })
+  },
   onAudio: (pcm) => connection?.sendBinary(pcm),
   onSpeechEnd: () => connection?.send({ type: 'speech-end' }),
 })
@@ -57,6 +69,14 @@ function render(): void {
   hud.showRecap(latest.recap, selfId)
 }
 
+function isCurrentReference(reference: PlayReference): boolean {
+  const game = latest?.game
+  return latest?.gameId === reference.gameId &&
+    game?.phase === 'playing' &&
+    game.round === reference.round &&
+    game.lastPlay?.seq === reference.playSeq
+}
+
 function handleMessage(message: ServerMessage): void {
   voice.handleMessage(message)
   switch (message.type) {
@@ -69,10 +89,20 @@ function handleMessage(message: ServerMessage): void {
     case 'caption':
       if (captionsEnabled) hud.addCaption(message.name, message.text, message.voice)
       break
+    case 'play-reference':
+      if (isCurrentReference(message)) {
+        activeReference = message
+        hud.showPlayReference(message)
+      }
+      break
     case 'state':
       // A newer state may already have arrived; never step backwards.
       if (latest && message.version < latest.version) return
       latest = message
+      if (activeReference && !isCurrentReference(activeReference)) {
+        activeReference = null
+        hud.showPlayReference(null)
+      }
       scene.sync(selfId, message.players, message.game)
       render()
       break
@@ -84,6 +114,7 @@ async function join(
   room: string,
   saveSpeech: boolean,
   aiRecap: boolean,
+  useGeminiAnalysis: boolean,
 ): Promise<void> {
   resumeAudio()
   hud.setJoining(true)
@@ -94,7 +125,8 @@ async function join(
     hud.showToast("No microphone: you can listen, but nobody will hear you.", 6000)
   }
   roomName = room
-  connection = new RoomConnection(room, name, saveSpeech, aiRecap, {
+  geminiAnalysis = useGeminiAnalysis
+  connection = new RoomConnection(room, name, saveSpeech, aiRecap, geminiAnalysis, {
     onMessage: handleMessage,
     onClosed: (reason) => leave(reason),
   })
@@ -109,6 +141,8 @@ function leave(reason = ''): void {
   connection?.close()
   connection = null
   latest = null
+  activeReference = null
+  hud.showPlayReference(null)
   selfId = ''
   speech.stop()
   voice.stop()
@@ -118,6 +152,7 @@ function leave(reason = ''): void {
 
 function playSelected(): void {
   if (!hud.canPlay) return
+  if (geminiAnalysis) speech.finishForPlay()
   connection?.send({ type: 'play', cards: scene.selectedCardIds() })
 }
 

@@ -1,9 +1,13 @@
-import type { AiSummary, GameView, PeerInfo, PlayerRecap, Recap, VoiceReadings} from './protocol.ts'
+import type {
+  AiSummary, GameView, PeerInfo, PlayerRecap, PlayReference, Recap, VoiceReadings,
+} from './protocol.ts'
 import { RANK_NAMES, REVOLVER_CHAMBERS } from './protocol.ts'
 import { voiceCues } from './voiceCues.ts'
 
 export interface HudActions {
-  onJoin: (name: string, room: string, saveSpeech: boolean, aiRecap: boolean) => void
+  onJoin: (
+    name: string, room: string, saveSpeech: boolean, aiRecap: boolean, geminiAnalysis: boolean,
+  ) => void
   onStart: () => void
   onPlay: () => void
   onCall: () => void
@@ -28,6 +32,11 @@ export const HUD_HTML = `
   <label class="checkbox">
     <input id="save-speech" type="checkbox" />
     Save a transcript of what I say, for post-game stats. Never the audio.
+  </label>
+  <label class="checkbox">
+    <input id="gemini-analysis" type="checkbox" />
+    While captions are on, send a short transcript and voice measurements from my
+    turn to Google Gemini. Other players may see a guess and its reason.
   </label>
   <label class="checkbox">
     <input id="ai-recap" type="checkbox" />
@@ -81,7 +90,13 @@ export const HUD_HTML = `
 
 <div id="top-bar" hidden>
   <div id="table-chip"></div>
-  <div id="prompt" role="status"></div>
+  <div class="turn-panel">
+    <div id="prompt" role="status"></div>
+    <div id="play-reference" role="status" hidden>
+      <strong id="reference-label"></strong>
+      <p id="reference-reason"></p>
+    </div>
+  </div>
   <div class="top-controls">
     <button type="button" id="mute" aria-pressed="false" title="Toggle microphone (M)">Mute</button>
     <button type="button" id="captions-toggle" aria-pressed="true" title="Toggle captions and stop sending your speech for them (C)">Captions on</button>
@@ -111,6 +126,7 @@ const OUTCOME_LABELS: Record<PlayerRecap['outcome'], string> = {
 }
 const CAPTION_SECONDS = 8
 const MAX_CAPTIONS = 4
+const REFERENCE_DURATION_MS = 5000
 
 function element<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T
@@ -147,6 +163,7 @@ export class Hud {
   private deadline = 0
   private promptText = ''
   private toastTimer = 0
+  private referenceTimer = 0
   private previous: GameView | null = null
   private selectedCount = 0
   private selfId = ''
@@ -159,6 +176,7 @@ export class Hud {
         this.roomInput.value,
         element<HTMLInputElement>('save-speech').checked,
         element<HTMLInputElement>('ai-recap').checked,
+        element<HTMLInputElement>('gemini-analysis').checked,
       )
     })
     this.startButton.addEventListener('click', actions.onStart)
@@ -173,6 +191,17 @@ export class Hud {
 
   get canPlay(): boolean {
     return !this.playButton.disabled && !this.actions.hidden
+  }
+
+  showPlayReference(reference: PlayReference | null): void {
+    clearTimeout(this.referenceTimer)
+    const hint = element<HTMLDivElement>('play-reference')
+    hint.hidden = reference === null
+    if (!reference) return
+    const guess = reference.judgment === 'likely_bluff' ? 'likely bluff' : 'likely truthful'
+    element('reference-label').textContent = `AI reference: ${guess}`
+    element('reference-reason').textContent = reference.explanation
+    this.referenceTimer = window.setTimeout(() => this.showPlayReference(null), REFERENCE_DURATION_MS)
   }
 
   get canCall(): boolean {
