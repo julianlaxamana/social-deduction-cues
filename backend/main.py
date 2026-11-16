@@ -2,7 +2,8 @@
 
 It also relays the WebRTC offers, answers and ICE candidates players need to
 connect to each other directly. Live voice never passes through this server;
-the only audio it receives is what players send to be captioned.
+the only audio it receives is what players send to be captioned. When every
+player opts in, a finished game is sent to Claude for a summary.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from uuid import uuid4
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from ai_summary import SummaryUnavailable, summarize
 from captions import BYTES_PER_SECOND, load_model, transcribe
 from game import Game, IllegalMove, Phase
 from game_log import GameLog
@@ -56,6 +58,8 @@ class Peer:
     socket: WebSocket
     # Whether this player agreed to have their words saved in the game log.
     save_speech: bool = False
+    # Whether this player agreed to have the game sent to Claude for a summary.
+    ai_recap: bool = False
     speech: bytearray = field(default_factory=bytearray)
 
     def info(self) -> dict[str, str]:
@@ -70,6 +74,11 @@ class Room:
     log: GameLog | None = None
     # Stats from the last game, until the next one starts.
     recap: dict | None = None
+    # Claude's summary of the last game: {"status": "pending" | "ready" |
+    # "failed" | "off", "text"?: str}. "off" means not everyone opted in.
+    ai_summary: dict | None = None
+    ai_consent: bool = False
+    summary_task: asyncio.Task | None = None
     timer: asyncio.Task | None = None
     # Lets clients discard a state update that overtook a newer one.
     version: int = 0
@@ -116,6 +125,37 @@ async def run_phase_timer(room: Room) -> None:
     await sync_room(room)
 
 
+async def write_summary(room: Room, events: list[dict]) -> None:
+    try:
+        room.ai_summary = {"status": "ready", "text": await summarize(events)}
+    except SummaryUnavailable as error:
+        room.ai_summary = {"status": "failed", "text": str(error)}
+    except Exception:
+        logger.exception("Could not summarize the game")
+        room.ai_summary = {"status": "failed", "text": "Claude couldn't write a summary"}
+    room.summary_task = None
+    # Not sync_room: that would restart the timer of whatever phase it is now.
+    await send_state(room)
+
+
+def start_summary(room: Room) -> None:
+    """Asks Claude for a summary of the game that just ended, if everyone agreed."""
+    if room.ai_summary is not None:
+        return
+    if not room.ai_consent:
+        room.ai_summary = {"status": "off"}
+        return
+    room.ai_summary = {"status": "pending"}
+    room.summary_task = asyncio.create_task(write_summary(room, list(room.log.events)))
+
+
+def cancel_summary(room: Room) -> None:
+    if room.summary_task:
+        room.summary_task.cancel()
+        room.summary_task = None
+    room.ai_summary = None
+
+
 async def sync_room(room: Room) -> None:
     """Restarts the phase timer and sends every player their view of the room."""
     if room.timer:
@@ -125,7 +165,11 @@ async def sync_room(room: Room) -> None:
         room.timer = asyncio.create_task(run_phase_timer(room))
         if room.game.phase is Phase.OVER:
             room.recap = build_recap(room.log.events)
+            start_summary(room)
+    await send_state(room)
 
+
+async def send_state(room: Room) -> None:
     room.version += 1
     players = [peer.info() for peer in room.peers.values()]
     await asyncio.gather(
@@ -138,7 +182,7 @@ async def sync_room(room: Room) -> None:
                     "players": players,
                     "game": room.game and room.game.view_for(peer.id),
                     "secondsLeft": room.game and PHASE_SECONDS[room.game.phase],
-                    "recap": room.recap,
+                    "recap": room.recap and {**room.recap, "ai": room.ai_summary},
                 },
             )
             for peer in room.peers.values()
@@ -157,6 +201,8 @@ async def handle_game_action(room: Room, peer: Peer, message: dict) -> None:
                         f"Need at least {MIN_PLAYERS_TO_START} players to start"
                     )
                 room.recap = None
+                cancel_summary(room)
+                room.ai_consent = all(p.ai_recap for p in room.peers.values())
                 room.log = GameLog(room.id)
                 room.game = Game(
                     [(p.id, p.name) for p in room.peers.values()],
@@ -241,7 +287,11 @@ async def handle_messages(room: Room, peer: Peer) -> None:
 
 @app.websocket("/ws/{room_id}")
 async def game_room(
-    socket: WebSocket, room_id: str, name: str = "Player", save_speech: bool = False
+    socket: WebSocket,
+    room_id: str,
+    name: str = "Player",
+    save_speech: bool = False,
+    ai_recap: bool = False,
 ) -> None:
     # Accept before rejecting: a browser only sees the close reason of an
     # established connection.
@@ -251,7 +301,11 @@ async def game_room(
         return
 
     peer = Peer(
-        uuid4().hex, name.strip()[:MAX_NAME_LENGTH] or "Player", socket, save_speech
+        uuid4().hex,
+        name.strip()[:MAX_NAME_LENGTH] or "Player",
+        socket,
+        save_speech,
+        ai_recap,
     )
 
     async with join_lock:
@@ -289,6 +343,7 @@ async def game_room(
         else:
             if room.timer:
                 room.timer.cancel()
+            cancel_summary(room)
             if rooms.get(room_id) is room:
                 del rooms[room_id]
 

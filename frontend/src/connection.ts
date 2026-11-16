@@ -14,10 +14,15 @@ export class RoomConnection {
     room: string,
     name: string,
     saveSpeech: boolean,
+    aiRecap: boolean,
     events: ConnectionEvents,
   ) {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-    const query = new URLSearchParams({ name, save_speech: String(saveSpeech) })
+    const query = new URLSearchParams({
+      name,
+      save_speech: String(saveSpeech),
+      ai_recap: String(aiRecap),
+    })
     this.socket = new WebSocket(
       `${scheme}://${location.host}/ws/${encodeURIComponent(room)}?${query}`,
     )

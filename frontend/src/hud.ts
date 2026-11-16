@@ -1,8 +1,8 @@
-import type { GameView, PeerInfo, PlayerRecap, Recap } from './protocol.ts'
+import type { AiSummary, GameView, PeerInfo, PlayerRecap, Recap } from './protocol.ts'
 import { RANK_NAMES, REVOLVER_CHAMBERS } from './protocol.ts'
 
 export interface HudActions {
-  onJoin: (name: string, room: string, saveSpeech: boolean) => void
+  onJoin: (name: string, room: string, saveSpeech: boolean, aiRecap: boolean) => void
   onStart: () => void
   onPlay: () => void
   onCall: () => void
@@ -27,6 +27,11 @@ export const HUD_HTML = `
   <label class="checkbox">
     <input id="save-speech" type="checkbox" />
     Save a transcript of what I say, for post-game stats. Never the audio.
+  </label>
+  <label class="checkbox">
+    <input id="ai-recap" type="checkbox" />
+    Send the finished game, and my saved transcript, to Claude (Anthropic) for
+    an AI summary. Only happens if everyone at the table ticks this.
   </label>
   <button type="submit" id="join" class="primary">Sit down</button>
   <p class="rules">
@@ -66,6 +71,10 @@ export const HUD_HTML = `
   </div>
   <ul id="recap-highlights"></ul>
   <ul id="recap-tells"></ul>
+  <div id="recap-ai" hidden>
+    <h3>Claude's take</h3>
+    <p id="recap-ai-text"></p>
+  </div>
   <button type="button" id="recap-close">Close</button>
 </section>
 
@@ -148,6 +157,7 @@ export class Hud {
         this.nameInput.value,
         this.roomInput.value,
         element<HTMLInputElement>('save-speech').checked,
+        element<HTMLInputElement>('ai-recap').checked,
       )
     })
     this.startButton.addEventListener('click', actions.onStart)
@@ -409,7 +419,21 @@ export class Hud {
         return item
       }),
     )
+    this.renderAiSummary(recap.ai)
     this.shownRecapId = recap.id
+  }
+
+  private renderAiSummary(summary: AiSummary | null): void {
+    const box = element('recap-ai')
+    box.hidden = !summary
+    if (!summary) return
+    box.dataset.status = summary.status
+    element('recap-ai-text').textContent = {
+      pending: 'Claude is reading the game…',
+      ready: summary.text ?? '',
+      failed: `No summary: ${summary.text ?? 'something went wrong'}.`,
+      off: 'No summary: not everyone at the table opted in.',
+    }[summary.status]
   }
 
   private closeRecap(): void {
